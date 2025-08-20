@@ -17,6 +17,12 @@ library(dplyr)
 # Speed & stability knobs 
 terraOptions(memfrac = 0.6, progress = 1)  
 
+# or import it
+r_dist   <- rast("/mnt/eo/EFDA_v211/latest_disturbance_eu_v211_2_3035.tif")
+r_forest <- rast("/mnt/eo/EFDA_v211/forestlanduse_mask_EUmosaic3035.tif")
+r_forest_aligned <- rast("/mnt/eo/EO4Backcasting/_intermediates/r_forest_aligned.tif")
+dist_mask <- rast("/mnt/eo/EO4Backcasting/_intermediates/dist_mask_11.tif")
+
 # -------------------------
 # USER INPUTS
 # -------------------------
@@ -64,11 +70,19 @@ if (crs(r_forest) != crs(crs_europe)) {
 }
 
 # Resample forest → disturbance grid (nearest). If your mask isn’t 1/NA, binarize before.
-message("Resampling forest (nearest) to match disturbance grid ...")
-# r_forest[r_forest > 0] <- 1; r_forest[r_forest <= 0] <- NA  # uncomment if needed
+# r_forest[r_forest > 0] <- 1; r_forest[r_forest <= 0] 
 r_forest_aligned <- resample(r_forest, r_dist, method = "near")
 if (!isTRUE(compareGeom(r_dist, r_forest_aligned, stopOnError = FALSE)))
   stop("Forest mask is not aligned to disturbance grid after resampling.")
+
+writeRaster(
+  r_forest_aligned, "/mnt/eo/EO4Backcasting/_intermediates/r_forest_aligned.tif",
+  wopt = list(datatype = "INT1U", gdal = c("COMPRESS=LZW","TILED=YES", "BIGTIFF = YES")),
+  overwrite = TRUE
+)
+
+# or import it
+r_forest_aligned <- rast("/mnt/eo/EO4Backcasting/_intermediates/r_forest_aligned.tif")
 
 # -------------------------
 # 2) EDGE EXCLUSION (one-pass focal range, on-disk)
@@ -89,6 +103,68 @@ m01 <- ifel(
   wopt      = list(datatype = "INT1U", gdal = "COMPRESS=LZW"),
   overwrite = TRUE
 )
+
+# 0) Runtime: stream to disk + give GDAL a bigger cache
+terraOptions(todisk = TRUE, memfrac = 0.5, progress = 1)
+# cache in MB; adjust if you have more/less RAM
+Sys.setenv(GDAL_CACHEMAX = "2048")
+
+# 1) Ensure m01 is a tiled, compressed INT1U GeoTIFF on disk
+#    (0/1 only; NA treated as 0 downstream)
+m01 <- ifel(dist_mask >= 1, 1L, 0L)
+m01 <- writeRaster(
+  m01,
+  filename = .out("m01_uint1.tif"),
+  wopt = list(datatype = "INT1U",
+              gdal = c("COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256", "BIGTIFF=YES")),
+  overwrite = TRUE
+)
+
+# 2) 3×3 kernel
+w3 <- matrix(1, 3, 3)
+
+# 3) Clean any stale outputs from previous runs
+unlink(.out("edge_sum3.tif"))
+
+# 4) Try the fast C++ 'sum' reducer first
+sum3_try <- try(
+  focal(
+    m01, w = w3, fun = "sum", na.policy = "omit", fillvalue = 0,
+    filename  = .out("edge_sum3.tif"),
+    wopt      = list(datatype = "INT2U",  # 0..9 fits in UINT16
+                     gdal = c("COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256", "BIGTIFF=YES")),
+    overwrite = TRUE
+  ),
+  silent = TRUE
+)
+
+if (inherits(sum3_try, "try-error")) {
+  message("focal(fun='sum') failed on this build; falling back to mean*9 (equivalent for 0/1).")
+  # Fallback: compute mean over 3×3 and multiply by 9 -> identical to sum on {0,1}
+  mean3 <- focal(
+    m01, w = w3, fun = "mean", na.policy = "omit", fillvalue = 0,
+    filename  = .out("edge_mean3.tif"),
+    wopt      = list(datatype = "FLT4S",
+                     gdal = c("COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256", "BIGTIFF=YES")),
+    overwrite = TRUE
+  )
+  sum3 <- round(mean3 * 9)
+  sum3 <- writeRaster(
+    sum3, filename = .out("edge_sum3.tif"),
+    wopt = list(datatype = "INT2U",
+                gdal = c("COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256", "BIGTIFF=YES")),
+    overwrite = TRUE
+  )
+} else {
+  sum3 <- sum3_try
+}
+
+# 5) Your original edge criterion
+edge_raw <- (sum3 > 0) & (sum3 < 9)
+
+
+
+# ---------------------------------------------------------------
 
 # or import it
 dist_mask <- rast("/mnt/eo/EO4Backcasting/_intermediates/dist_mask_11.tif")
@@ -112,7 +188,7 @@ cell_diag <- sqrt(res(dist_mask)[1]^2 + res(dist_mask)[2]^2)
 interior_1px <- d > cell_diag
 
 writeRaster(
-  interior_1px, "dist_mask_interior_1px.tif",
+  interior_1px, "/mnt/eo/EO4Backcasting/_intermediates/dist_mask_interior_1px_new.tif",
   wopt = list(datatype = "INT1U", gdal = c("COMPRESS=LZW","TILED=YES","BIGTIFF=YES")),
   overwrite = TRUE
 )
@@ -133,15 +209,18 @@ writeRaster(
 # 3) SYSTEMATIC 2.5 km LATTICE
 # -------------------------
 message("Generating systematic lattice points ...")
-r_grid <- rast(ext(r_dist), crs = crs(r_dist), resolution = grid_spacing_m)
-r_grid <- init(r_grid, fun = "cell")      # unique id per coarse cell
+# Robust way: copy the disturbance raster, then change only the resolution
+r_grid <- rast(r_dist)                 # copies extent + CRS safely
+res(r_grid) <- grid_spacing_m          # set both x/y resolution (meters in EPSG:3035)
+r_grid <- init(r_grid, fun = "cell")   # unique id per coarse cell
+
 p_grid <- as.points(r_grid)               # one point at each cell center (SpatVector)
 
 # -------------------------
 # 4) CLASSIFY LATTICE POINTS
 # -------------------------
 message("Extracting labels at lattice points ...")
-v_year   <- terra::extract(r_dist,           p_grid)[, 2]
+v_year   <- terra::extract(r_dist, p_grid)[, 2]
 v_forest <- terra::extract(r_forest_aligned, p_grid)[, 2]
 v_edge   <- terra::extract(edge_exclude01,   p_grid)[, 2]; v_edge[is.na(v_edge)] <- 0
 
