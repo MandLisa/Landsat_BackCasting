@@ -48,15 +48,19 @@ writeRaster(
 n_ok <- as.integer(global(!is.na(target), "sum", na.rm = TRUE)[1,1])
 set.seed(123)
 
+# sample 750k from the stratum "1" only
+set.seed(123)
 samp_points <- spatSample(
-  target,
-  size      = 750000L,
+  x         = target,
+  strata    = target,             # use target values as strata
+  size      = c("1" = 750000L),   # request only from class/value 1
   method    = "random",
   as.points = TRUE,
-  na.rm     = TRUE,   # ignores NAs
-  values    = FALSE   # don't attach raster values
+  na.rm     = TRUE,
+  values    = FALSE
 )
-nrow(samp_points)  # should be 750000
+
+nrow(samp_points)
 
 
 
