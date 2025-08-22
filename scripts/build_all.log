@@ -1,0 +1,8 @@
+==> Year 1984
+   Tiles found: 399
+...............
+   Proxies attempted: 399   failed: 0
+   Proxies present:  399
+   VRT sources:      2394
+   [ERROR] VRT sources (2394) != tiles (399). Inspect /mnt/dss_europe/mosaic/mosaics_BAPs_vrt/19840801_LEVEL3_LNDLG_IBAP.vrt
+[STOP] at year 1984

@@ -5,6 +5,7 @@ r_dist   <- rast("/mnt/eo/EFDA_v211/latest_disturbance_eu_v211_2_3035.tif")
 r_forest <- rast("/mnt/eo/EFDA_v211/forestlanduse_mask_EUmosaic3035.tif")
 r_forest_aligned <- rast("/mnt/eo/EO4Backcasting/_intermediates/r_forest_aligned.tif")
 dist_mask <- rast("/mnt/eo/EO4Backcasting/_intermediates/dist_mask_11.tif")
+target <- rast("/mnt/eo/EO4Backcasting/_intermediates/dist_mask_core_1985_2008.tif")
 
 # dist_mask: 0/1, projected CRS in meters (or any linear units)
 
@@ -46,15 +47,17 @@ writeRaster(
 # Count and sample
 n_ok <- as.integer(global(!is.na(target), "sum", na.rm = TRUE)[1,1])
 set.seed(123)
+
 samp_points <- spatSample(
   target,
-  size      = min(750000L, n_ok),
+  size      = 750000L,
   method    = "random",
   as.points = TRUE,
-  na.rm     = TRUE,
-  values    = FALSE,
-  warn      = FALSE
+  na.rm     = TRUE,   # ignores NAs
+  values    = FALSE   # don't attach raster values
 )
+nrow(samp_points)  # should be 750000
+
 
 
 # 5) Save to file (streamed write)
@@ -64,7 +67,7 @@ writeVector(samp_points, "/mnt/eo/EO4Backcasting/_intermediates/sample_points_co
 
 #-------------------------------------------------------------------------------
 ### extract distrbance year
-
+samp_points <- vect("/mnt/eo/EO4Backcasting/_intermediates/sample_points_core_1985_2005_yod.gpkg")
 # Ensure the raster layer is clearly named (helps downstream)
 names(r_dist) <- "yod"
 
