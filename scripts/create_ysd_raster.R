@@ -79,4 +79,9 @@ out <- tibble(
   bap_value = vals$bap_value
 )
 
+# drop NA
+out <- filter(out, !is.na(bap_value), !is.na(ysd))
 
+# write csv
+write.csv(out, "/mnt/eo/EO4Backcasting/_intermediates/training data.csv",
+          row.names = FALSE)
