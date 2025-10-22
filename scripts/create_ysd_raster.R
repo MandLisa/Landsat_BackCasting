@@ -60,7 +60,23 @@ write.csv(df, "/mnt/eo/EO4Backcasting/_intermediates/sample_points_core_1985_200
           row.names = FALSE)
 
 # extract BAPs
+# terra I/O safety
+terraOptions(memfrac = 0.6, todisk = TRUE)
 
+# load BAP
+bap  <- rast("/mnt/dss_europe/mosaics_eu/mosaics_eu_baps/1985_mosaic_eu_cog.tif") 
 
+# extract
+vals <- extract(bap, pts, ID = FALSE)  
+names(vals) <- "bap_value"
+
+# ---- build the requested table --------------------------------------------
+out <- tibble(
+  x        = df$x,
+  y        = df$y,
+  yod      = df$yod,
+  ysd      = df$ysd,
+  bap_value = vals$bap_value
+)
 
 
