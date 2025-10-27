@@ -136,3 +136,103 @@ points_csv   <- "/mnt/eo/EO4Backcasting/_intermediates/training_data/nbr_evi_ext
 pts <- fread(points_csv)[, .(id, x, y, yod, year, ysd, ysd_bin, class_label, EVI, NBR)]
 
 
+### extract band-wise BAP values
+# --- USER INPUTS --------------------------------------------------------------
+bap_dir   <- "/mnt/dss_europe/mosaics_eu/mosaics_eu_baps"
+bap_pat   <- "^(\\d{4})_mosaic_eu_cog\\.tif$"
+yr_min    <- 1985
+yr_max    <- 2024
+nodata    <- -10000      # set to NULL if your BAPs don't use coded NoData
+out_csv   <- "/mnt/eo/EO4Backcasting/_intermediates/training_data/nbr_evi_bap_extracted.csv"
+
+# --- LIST BAP FILES -----------------------------------------------------------
+bap_files <- list.files(bap_dir, pattern = bap_pat, full.names = TRUE)
+bap_years <- as.integer(str_match(basename(bap_files), bap_pat)[,2])
+tbl_bap <- data.table(file = bap_files, year = bap_years)[
+  !is.na(year)][order(year)][year >= yr_min & year <= yr_max]
+stopifnot(nrow(tbl_bap) > 0)
+
+# --- POINTS VECTOR: ensure valid CRS -----------------------------------------
+# Build once (include 'id' so we can join back)
+v_all <- terra::vect(pts[, .(x, y, id)], geom = c("x","y"))
+
+# Use the first BAP as CRS reference
+R0 <- terra::rast(tbl_bap$file[1])
+
+# If points have no CRS, *assign* the BAP CRS (not a reprojection yet)
+if (is.na(terra::crs(v_all)) || terra::crs(v_all) == "") {
+  terra::crs(v_all) <- terra::crs(R0)
+}
+
+# If CRS still differs, now we can safely project
+if (!terra::same.crs(v_all, R0)) {
+  v_all <- terra::project(v_all, terra::crs(R0))
+}
+
+# --- YEAR-BY-YEAR EXTRACTION (no stacking, tolerant to edge diffs) -----------
+out_list <- vector("list", nrow(tbl_bap))
+
+for (i in seq_len(nrow(tbl_bap))) {
+  f  <- tbl_bap$file[i]
+  yy <- tbl_bap$year[i]
+  
+  R <- terra::rast(f)  # multiband BAP for one year
+  
+  # If a particular year uses a different CRS (unlikely), project points on the fly
+  v_use <- if (!terra::same.crs(v_all, R)) terra::project(v_all, terra::crs(R)) else v_all
+  
+  # Keep only points inside this raster's extent
+  v_in <- try(terra::crop(v_use, R), silent = TRUE)
+  if (inherits(v_in, "try-error") || is.null(v_in) || nrow(v_in) == 0) {
+    out_list[[i]] <- data.table(id = integer(), year = integer())
+    next
+  }
+  
+  # Extract band values (n_points_in × n_bands)
+  vals <- terra::extract(R, v_in, ID = FALSE)
+  dt   <- as.data.table(vals)
+  
+  # Convert coded NoData to NA (if applicable)
+  if (!is.null(nodata) && ncol(dt) > 0) {
+    for (cc in names(dt)) {
+      set(dt, which(dt[[cc]] == nodata), cc, NA_real_)
+    }
+  }
+  
+  # Name bands b1..bK
+  if (ncol(dt) > 0) setnames(dt, paste0("b", seq_len(ncol(dt))))
+  
+  # Attach ids and year
+  dt[, `:=`(id = v_in$id, year = yy)]
+  setcolorder(dt, c("id","year", setdiff(names(dt), c("id","year"))))
+  
+  # Availability flag (useful later)
+  dt[, bap_available := TRUE]
+  
+  out_list[[i]] <- dt
+}
+
+# Combine across years; varying band counts are handled with fill=TRUE
+BAP_wide <- rbindlist(out_list, use.names = TRUE, fill = TRUE)
+
+# Ensure flag exists even if no rows had coverage
+if (!"bap_available" %in% names(BAP_wide)) BAP_wide[, bap_available := FALSE]
+
+# --- JOIN INTO YOUR EXISTING 'long' (id × year) -------------------------------
+setkey(long, id, year)
+setkey(BAP_wide, id, year)
+
+band_cols <- setdiff(names(BAP_wide), c("id","year","bap_available"))
+if (length(band_cols)) {
+  long[BAP_wide, (band_cols) := mget(paste0("i.", band_cols))]
+}
+long[BAP_wide, bap_available := i.bap_available]
+
+# Optional: drop rows with no BAP coverage (edge outside 1995/2003)
+# long <- long[bap_available == TRUE]
+
+# Optional: rescale reflectance if scaled (e.g., divide by 10000)
+# long[, (band_cols) := lapply(.SD, function(x) x / 10000), .SDcols = band_cols]
+
+# --- WRITE OUT ---------------------------------------------------------------
+fwrite(long, out_csv)
