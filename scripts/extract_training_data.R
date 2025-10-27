@@ -129,3 +129,10 @@ long[EVI_long, EVI := i.EVI]
 # --- WRITE OUT (if desired) ---------------------------------------------------
 fwrite(long, "/mnt/eo/EO4Backcasting/_intermediates/training_data/nbr_evi_extracted.csv")
 
+#-------------------------------------------------------------------------------
+### read in df containing EVI and NBR values to extract band-wise BAP values
+points_csv   <- "/mnt/eo/EO4Backcasting/_intermediates/training_data/nbr_evi_extracted.csv"
+
+pts <- fread(points_csv)[, .(id, x, y, yod, year, ysd, ysd_bin, class_label, EVI, NBR)]
+
+
