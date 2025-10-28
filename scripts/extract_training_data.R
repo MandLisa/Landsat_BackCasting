@@ -6,7 +6,7 @@ library(stringr)
 points_csv   <- "/mnt/eo/EO4Backcasting/_intermediates/sample_points_core_1985_2005_yod_ysd_xy.csv"
 ras_dir      <- "/mnt/eo/eu_mosaics/NBR_comp/"
 pattern      <- "^NBR_(\\d{4})\\.tif$"
-out_csv      <- "/mnt/eo/EO4Backcasting/_intermediates/nbr_extracted.csv"
+out_csv      <- "/mnt/eo/EO4Backcasting/_intermediates/training_data.csv"
 include_yod_year <- FALSE   # FALSE => keep only year > YOD (YSD >= 1)
 
 # --- READ POINTS --------------------------------------------------------------
@@ -219,6 +219,7 @@ BAP_wide <- rbindlist(out_list, use.names = TRUE, fill = TRUE)
 if (!"bap_available" %in% names(BAP_wide)) BAP_wide[, bap_available := FALSE]
 
 # --- JOIN INTO YOUR EXISTING 'long' (id × year) -------------------------------
+long <- pts
 setkey(long, id, year)
 setkey(BAP_wide, id, year)
 
