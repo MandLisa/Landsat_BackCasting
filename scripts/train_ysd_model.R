@@ -158,7 +158,7 @@ print(head(imp, 10))
 message("Loading 1985 BAP raster...")
 r1985 <- rast(BAP1985_PATH)
 
-# enforce b1..b6 names if 6 layers
+# enforce b1..b6 names if 6 layer
 if (nlyr(r1985) == 6) names(r1985) <- required_bands
 
 # check required bands present; subset & order to x_cols
