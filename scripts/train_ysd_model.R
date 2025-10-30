@@ -4,7 +4,7 @@ library(caret)
 library(xgboost)
 library(terra)   
 library(stringr)
-
+library(Metrics)
 
 # --- INPUTS ------------------------------------------------------------------
 # 1) Your training table
@@ -169,15 +169,20 @@ if (length(missing_1985) > 0) {
 r_pred <- r1985[[x_cols]]  # ensures order matches training
 
 # --- PREDICT YSD ON 1985; WRITE GEO-TIFFS ------------------------------------
-message("Predicting YSD on 1985 raster...")
-.predict_xgb <- function(m) predict(final_xgb, as.matrix(m))
+.predict_xgb <- function(model, data, ...) {
+  predict(model, as.matrix(data))   # use all trees in final_xgb
+}
 
 ysd_1985 <- terra::predict(
-  r_pred, model = .predict_xgb,
-  filename = OUT_YSD_FLOAT, overwrite = TRUE,
-  wopt = list(datatype = "FLT4S",
-              gdal = "COMPRESS=DEFLATE,ZLEVEL=6,PREDICTOR=3")
+  r_pred,
+  model    = final_xgb,
+  fun      = .predict_xgb,
+  filename = OUT_YSD_FLOAT,
+  overwrite= TRUE,
+  wopt     = list(datatype="FLT4S",
+                  gdal="COMPRESS=DEFLATE,ZLEVEL=6,PREDICTOR=3")
 )
+
 
 message("Writing integer YSD and backcast YOD rasters...")
 ysd_1985_int <- clamp(round(ysd_1985), lower = AGE_MIN, upper = AGE_MAX, values = TRUE)
