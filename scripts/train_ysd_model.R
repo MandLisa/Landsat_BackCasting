@@ -11,7 +11,7 @@ library(stringr)
 #    Must include: year, ysd, and the six reflectance bands as numeric columns.
 #    Object name is 'pts' (as you said).
 # 2) 1985 multiband BAP raster with the same 6 bands (order can be corrected).
-bap1985_path <- "/mnt/dss_europe/mosaics_eu/mosaics_eu_baps/1985_mosaic_eu_cog.tif"
+bap1985_path <- "/mnt/dss_europe/level3_interpolated/X0021_Y0029/19850801_LEVEL3_LNDLG_IBAP.tif"
 points_csv   <- "/mnt/eo/EO4Backcasting/_intermediates/training_data.csv"
 pts <- fread(points_csv)[, .(id, x, y, yod, year, ysd, ysd_bin, class_label, EVI, NBR, b1, b2, b3, b4, b5, b6)]
 
@@ -28,7 +28,7 @@ TRAIN_PARQUET <- NULL
 TRAIN_RDS     <- NULL                                      
 
 # 2) 1985 BAP raster (6-band stack; order doesn't matter, we'll rename)
-BAP1985_PATH  <- "/mnt/dss_europe/mosaics_eu/mosaics_eu_baps/1985_mosaic_eu_cog.tif"
+BAP1985_PATH  <- "/mnt/dss_europe/level3_interpolated/X0021_Y0029/19850801_LEVEL3_LNDLG_IBAP.tif"
 
 # 3) Output files
 OUT_YSD_FLOAT <- "/mnt/eo/EO4Backcasting/_intermediates/ysd_1985_xgb.tif"
