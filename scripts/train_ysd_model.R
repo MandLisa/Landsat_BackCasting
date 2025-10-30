@@ -113,6 +113,7 @@ grid <- expand.grid(
   subsample = c(0.8, 1.0)
 )
 
+### model training
 message("Tuning XGBoost (5-fold CV)...")
 fit <- train(
   x = x_tr, y = y_tr,
