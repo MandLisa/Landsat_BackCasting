@@ -1,7 +1,7 @@
 # ========================== BACKCAST YSD FROM 1985 ===========================
-# Train RF oder XGB auf Trainingspunkten und predicte YSD (Jahre seit Störung)
-# im Jahr 1985 für: (1) BAP b1..b6, (2) NBR1985, (3) EVI1985.
-# Danach: Ensemble (Median), Agreement (Paare ±1 Jahr), Unsicherheit (IQR/SD).
+# RF/XGB-Training auf Punkten; Vorhersage NUR auf Wald (1/NA) und NUR
+# auf das Grid & die Ausdehnung der getrimmten Waldmaske.
+# Karten: (1) BAP b1..b6, (2) NBR1985, (3) EVI1985 + CoE (Median/Agreement/Spread)
 # ============================================================================
 
 # --- PACKAGES ----------------------------------------------------------------
@@ -15,46 +15,59 @@ suppressPackageStartupMessages({
 })
 
 # --- THREADING / PERFORMANCE -------------------------------------------------
-# Passe diese Werte an deine Maschine an
-options(ranger.num.threads = 30)
-data.table::setDTthreads(30)
-terraOptions(progress = 1)   # Fortschritt anzeigen
+options(ranger.num.threads = 48)
+data.table::setDTthreads(48)
+terraOptions(progress = 1)   # Fortschrittsbalken
+# terraOptions(memfrac = 0.8) # optional: RAM-Auslastung
 
 # --- USER INPUTS -------------------------------------------------------------
-# Trainingsdaten (müssen mind. 'year', ysd ODER yod, und b1..b6 enthalten)
 TRAIN_CSV     <- "/mnt/eo/EO4Backcasting/_intermediates/training_data.csv"
-TRAIN_PARQUET <- NULL    # z.B. "/path/train.parquet"
-TRAIN_RDS     <- NULL    # z.B. "/path/train.rds"
+TRAIN_PARQUET <- NULL
+TRAIN_RDS     <- NULL
 
-# Rasterpfade
 BAP1985_PATH  <- "/mnt/dss_europe/level3_interpolated/X0021_Y0029/19850801_LEVEL3_LNDLG_IBAP.tif" # 6 Bänder
 NBR1985_PATH  <- "/mnt/eo/eu_mosaics/NBR_comp/NBR_1985.tif"  # 1 Band
 EVI1985_PATH  <- "/mnt/eo/eu_mosaics/EVI_comp/EVI_1985.tif"  # 1 Band
-FOREST_MASK   <- "/mnt/eo/EFDA_v211/forestlanduse_mask_EUmosaic3035.tif" # 1=Forest, 0/NA=Non-forest
+FOREST_MASK   <- "/mnt/eo/EFDA_v211/forest_landuse_aligned.tif" 
 
-# Ausgaben
 OUT_DIR <- "/mnt/eo/EO4Backcasting/_intermediates/predictions"
 dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
 
-# Training/Altersbereich
 TRAIN_YEARS <- 1986:2024
 AGE_MIN     <- 1
 AGE_MAX     <- 20
 
-# Skalierung angleichen? (TRUE, wenn Punkte 0–10000 und Raster 0–1 sind)
-RESCALE_PTS_TO_0_1 <- FALSE   # skaliert NUR Punkte (falls nötig), Raster bleiben wie sind
-SCALE_RASTERS_BY   <- 1       # setze auf 10000 oder 0.0001, falls du Raster aktiv skalieren willst
+# Skalenabgleich: Punkte 0..10000 vs Raster 0..1?
+RESCALE_PTS_TO_0_1 <- FALSE   # skaliert NUR die Punkt-Bänder b1..b6
+SCALE_RASTERS_BY   <- 1       # setze ggf. 10000 oder 0.0001, um Raster anzupassen
 
-# Lernverfahren: "rf" (robust, einfach) oder "xgb" (dein ursprüngliches XGBoost)
-ENGINE <- "rf"
-
+ENGINE <- "rf" # "rf" oder "xgb"
 set.seed(42)
 
-# --- LOAD TRAIN TABLE --------------------------------------------------------
+# --- HILFSFUNKTIONEN ---------------------------------------------------------
+align_to_mask <- function(x, mask, method_bilinear = TRUE) {
+  # gleiche Raster x exakt an das Grid der Maske an (CRS, Auflösung, Alignment)
+  if (!same.crs(x, mask)) {
+    x <- project(x, mask, method = if (method_bilinear) "bilinear" else "near")
+  } else {
+    x <- resample(x, mask, method = if (method_bilinear) "bilinear" else "near")
+  }
+  x
+}
+
+mask_to_forest <- function(x, mask_trimmed) {
+  # behalte Werte NUR dort, wo Maske nicht NA (== Wald==1); sonst NA
+  mask(x, mask_trimmed)  # Maske hat 1 (Wald) und NA (kein Wald)
+}
+
+to_int <- function(r, lo=AGE_MIN, hi=AGE_MAX) {
+  clamp(round(r), lower = lo, upper = hi, values = TRUE)
+}
+
+# --- TRAININGSDATEN LADEN ----------------------------------------------------
 message("Loading training data...")
 if (!is.null(TRAIN_PARQUET)) {
-  library(arrow)
-  pts <- as.data.table(read_parquet(TRAIN_PARQUET))
+  library(arrow); pts <- as.data.table(read_parquet(TRAIN_PARQUET))
 } else if (!is.null(TRAIN_RDS)) {
   pts <- as.data.table(readRDS(TRAIN_RDS))
 } else {
@@ -70,27 +83,23 @@ if (!("ysd" %in% names(pts))) {
 miss <- setdiff(required_bands, names(pts))
 if (length(miss) > 0) stop("Missing bands in training table: ", paste(miss, collapse=", "))
 
-# numerisch erzwingen + optional reskalieren
 for (nm in required_bands) if (!is.numeric(pts[[nm]])) pts[, (nm) := as.numeric(get(nm))]
 if (RESCALE_PTS_TO_0_1) pts[, (required_bands) := lapply(.SD, \(z) z/10000), .SDcols = required_bands]
 
-# Subset nach Jahren/Alter, NA droppen
 train <- pts[year %in% TRAIN_YEARS & is.finite(ysd)]
 train <- train[ysd >= AGE_MIN & ysd <= AGE_MAX]
 train <- train[complete.cases(train[, ..required_bands])]
 if (nrow(train) < 1000) warning("Training set seems small (n < 1000).")
 
-# Feature-Matrix und Ziel
 x_cols <- required_bands
 x <- as.matrix(train[, ..x_cols])
 y <- train$ysd
 
-# Klassen-Weights gegen schiefe Altersverteilung
 age_tab <- table(y)
 w <- 1 / as.numeric(age_tab[as.character(y)])
 w <- w / mean(w)
 
-# --- TRAINING ---------------------------------------------------------------
+# --- MODELLTRAINING ----------------------------------------------------------
 if (ENGINE == "xgb") {
   message("Training XGBoost with 5-fold CV...")
   idx  <- caret::createDataPartition(y, p=0.8, list=FALSE)
@@ -107,31 +116,23 @@ if (ENGINE == "xgb") {
     min_child_weight = c(1, 5),
     subsample = c(0.8, 1.0)
   )
-  
-  fit <- train(x = x_tr, y = y_tr,
-               method = "xgbTree",
-               trControl = ctrl,
-               tuneGrid  = grid,
-               metric    = "RMSE",
-               weights   = w_tr)
-  
+  fit <- train(x = x_tr, y = y_tr, method = "xgbTree",
+               trControl = ctrl, tuneGrid  = grid,
+               metric = "RMSE", weights = w_tr)
   best <- fit$bestTune
   message("Best params:"); print(best)
   
   pred_te <- predict(fit, x_te)
   message(sprintf("Hold-out RMSE=%.3f  MAE=%.3f  R^2=%.3f",
-                  rmse(y_te, pred_te),
-                  mae(y_te, pred_te),
+                  rmse(y_te, pred_te), mae(y_te, pred_te),
                   1 - sum((y_te - pred_te)^2)/sum((y_te - mean(y_te))^2)))
   
-  # final model on all data
   d_all <- xgb.DMatrix(x, label = y, weight = w)
   params <- list(
     objective = "reg:squarederror", eval_metric = "rmse",
     eta = best$eta, max_depth = best$max_depth, gamma = best$gamma,
     subsample = best$subsample, colsample_bytree = best$colsample_bytree,
-    min_child_weight = best$min_child_weight,
-    nthread = 48
+    min_child_weight = best$min_child_weight, nthread = 48
   )
   final_model <- xgb.train(params, d_all, nrounds = best$nrounds, verbose = 0)
   PRED_FUN <- function(model, data, ...) predict(model, as.matrix(data))
@@ -144,7 +145,6 @@ if (ENGINE == "xgb") {
     min.node.size = 5, importance = "impurity",
     num.threads = 48, seed = 42
   )
-  # 1D-Modelle
   stopifnot(all(c("NBR","EVI") %in% names(train)))
   rf_nbr <- ranger(ysd ~ NBR, data = as.data.frame(train[, .(ysd, NBR)]),
                    num.trees=1000, min.node.size=5, num.threads=48, seed=42)
@@ -154,52 +154,52 @@ if (ENGINE == "xgb") {
   PRED_FUN <- function(model, data, ...) {
     as.numeric(predict(model, data=as.data.frame(data), num.threads=48)$predictions)
   }
-} else {
-  stop("ENGINE must be 'rf' or 'xgb'.")
-}
+} else stop("ENGINE must be 'rf' or 'xgb'.")
 
-# --- LOAD RASTERS & FOREST MASK ---------------------------------------------
-message("Loading rasters & aligning...")
-r_mask <- rast(FOREST_MASK)                 # 1/0/NA
-r_bap  <- rast(BAP1985_PATH)                # 6 bands
+# --- WALDMASKE LADEN & TRIMMEN ----------------------------------------------
+message("Loading forest mask and trimming to valid forest extent...")
+r_mask_full <- rast(FOREST_MASK)           # 1 = Wald, NA = kein Wald
+# trim entfernt umgebende NA-Ränder -> kleineres Ausmaß, rechen- & IO-schonend
+r_mask <- trim(r_mask_full)                # Referenzgrid (CRS/Res/Alignment!)
+
+
+# --- RASTER LADEN & EXAKT AUF MASKEN-GRID AUSRICHTEN ------------------------
+message("Loading rasters and aligning to trimmed mask grid...")
+r_bap  <- rast(BAP1985_PATH)                # 6 Bänder
 if (nlyr(r_bap) != 6) stop("BAP1985 must have 6 bands.")
 names(r_bap) <- c("b1","b2","b3","b4","b5","b6")
 
-r_nbr <- rast(NBR1985_PATH); names(r_nbr) <- "NBR"
-r_evi <- rast(EVI1985_PATH); names(r_evi) <- "EVI"
+r_nbr  <- rast(NBR1985_PATH); names(r_nbr) <- "NBR"
+r_evi  <- rast(EVI1985_PATH); names(r_evi) <- "EVI"
 
-# Auf BAP ausrichten
-r_mask <- resample(r_mask, r_bap, method="near")
-r_nbr  <- resample(r_nbr,  r_bap, method="bilinear")
-r_evi  <- resample(r_evi,  r_bap, method="bilinear")
+# An Masken-Grid ausrichten (project/resample je nach CRS)
+r_bap_a <- align_to_mask(r_bap, r_mask, method_bilinear = TRUE)
+r_nbr_a <- align_to_mask(r_nbr, r_mask, method_bilinear = TRUE)
+r_evi_a <- align_to_mask(r_evi, r_mask, method_bilinear = TRUE)
 
-# (optional) Raster-Skalierung, falls nötig:
+# (optional) Skalenanpassung der Raster, falls nötig
 if (SCALE_RASTERS_BY != 1) {
-  r_bap <- r_bap * SCALE_RASTERS_BY
-  r_nbr <- r_nbr * SCALE_RASTERS_BY
-  r_evi <- r_evi * SCALE_RASTERS_BY
+  r_bap_a <- r_bap_a * SCALE_RASTERS_BY
+  r_nbr_a <- r_nbr_a * SCALE_RASTERS_BY
+  r_evi_a <- r_evi_a * SCALE_RASTERS_BY
 }
 
-# Nur Wald (Maske: 1 = Wald, NA = kein Wald)
-r_bap_f <- mask(r_bap, r_mask)   
-r_nbr_f <- mask(r_nbr, r_mask)
-r_evi_f <- mask(r_evi, r_mask)
+# --- ZUSCHNEIDEN & NUR WALD-PIXEL BEHALTEN -----------------------------------
+# Crop auf Masken-Ausmaß (nach trim), dann Maskierung (NA außerhalb Wald)
+message("Cropping rasters to mask extent and keeping only forest pixels...")
+r_bap_c <- crop(r_bap_a, r_mask)
+r_nbr_c <- crop(r_nbr_a, r_mask)
+r_evi_c <- crop(r_evi_a, r_mask)
 
-writeRaster(
-  r_nbr_f,
-  filename = file.path(OUT_DIR, "nbr_crop.tif"),
-  overwrite = TRUE,
-  wopt = list(
-    datatype = "INT1U",               # 1 Byte, reicht für 0/1
-    gdal = "COMPRESS=DEFLATE,ZLEVEL=6"
-  )
-)
+r_bap_f <- mask_to_forest(r_bap_c, r_mask)
+r_nbr_f <- mask_to_forest(r_nbr_c, r_mask)
+r_evi_f <- mask_to_forest(r_evi_c, r_mask)
 
-# --- PREDICT YSD 1985 --------------------------------------------------------
+# --- PREDICT YSD 1985 (nur Wald, masken-grid, zugeschnitten) -----------------
 wopt_flt <- list(datatype="FLT4S", gdal="COMPRESS=DEFLATE,ZLEVEL=6,PREDICTOR=3")
 wopt_i16 <- list(datatype="INT2S", gdal="COMPRESS=DEFLATE,ZLEVEL=6")
 
-message("Predicting YSD on 1985 BAP...")
+message("Predicting YSD on 1985 BAP (forest only)...")
 if (ENGINE == "xgb") {
   ysd_bap <- terra::predict(
     r_bap_f[[x_cols]], final_model, fun = PRED_FUN,
@@ -216,8 +216,8 @@ if (ENGINE == "xgb") {
   )
 }
 
-message("Predicting YSD on NBR1985...")
-if (ENGINE == "xgb") stop("Für NBR/EVI-only bitte ENGINE='rf' oder eigene 1D-XGB-Modelle trainieren.")
+message("Predicting YSD on NBR1985 (forest only)...")
+if (ENGINE == "xgb") stop("Für NBR/EVI-only bitte ENGINE='rf' oder 1D-XGB-Modelle trainieren.")
 ysd_nbr <- terra::predict(
   r_nbr_f, rf_nbr, fun = PRED_FUN,
   cores = 48,
@@ -225,7 +225,7 @@ ysd_nbr <- terra::predict(
   overwrite = TRUE, wopt = wopt_flt
 )
 
-message("Predicting YSD on EVI1985...")
+message("Predicting YSD on EVI1985 (forest only)...")
 ysd_evi <- terra::predict(
   r_evi_f, rf_evi, fun = PRED_FUN,
   cores = 48,
@@ -233,9 +233,7 @@ ysd_evi <- terra::predict(
   overwrite = TRUE, wopt = wopt_flt
 )
 
-# --- INTEGER YSD + YOD (für 1985) -------------------------------------------
-to_int <- function(r) clamp(round(r), lower = AGE_MIN, upper = AGE_MAX, values = TRUE)
-
+# --- INTEGER YSD + YOD (1985) -----------------------------------------------
 ysd_bap_i <- to_int(ysd_bap)
 writeRaster(ysd_bap_i, file.path(OUT_DIR, "ysd_1985_BAP_int.tif"), overwrite=TRUE, wopt=wopt_i16)
 writeRaster(1985 - ysd_bap_i, file.path(OUT_DIR, "yod_1985_BAP.tif"), overwrite=TRUE, wopt=wopt_i16)
@@ -248,8 +246,8 @@ ysd_evi_i <- to_int(ysd_evi)
 writeRaster(ysd_evi_i, file.path(OUT_DIR, "ysd_1985_EVI_int.tif"), overwrite=TRUE, wopt=wopt_i16)
 writeRaster(1985 - ysd_evi_i, file.path(OUT_DIR, "yod_1985_EVI.tif"), overwrite=TRUE, wopt=wopt_i16)
 
-# --- CONVERGENCE-OF-EVIDENCE -------------------------------------------------
-message("Building ensemble & uncertainty layers...")
+# --- CONVERGENCE OF EVIDENCE -------------------------------------------------
+message("Building ensemble & uncertainty layers (forest only)...")
 ysd_stack <- c(ysd_bap, ysd_nbr, ysd_evi)
 
 ysd_ens_median <- app(
@@ -285,7 +283,7 @@ ysd_sd  <- app(
 message("Done.")
 message(sprintf("Outputs written to: %s", OUT_DIR))
 
-# --- OPTIONAL CHECKS ---------------------------------------------------------
+# --- OPTIONAL: QUICK SANITY CHECKS ------------------------------------------
+# Prüfe, ob Bänder & Wertebereiche zusammenpassen:
 # q_train <- sapply(as.data.table(x), quantile, probs=c(.01,.99), na.rm=TRUE)
 # q_bap   <- as.data.frame(global(r_bap_f, fun=quantile, na.rm=TRUE, probs=c(.01,.99)))
-# Vergleiche Verteilungsbereiche und skaliere ggf. Raster oder Punkte.
