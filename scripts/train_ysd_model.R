@@ -15,8 +15,8 @@ suppressPackageStartupMessages({
 })
 
 # --- THREADING / PERFORMANCE -------------------------------------------------
-options(ranger.num.threads = 48)
-data.table::setDTthreads(48)
+options(ranger.num.threads = 30)
+data.table::setDTthreads(30)
 terraOptions(progress = 1)   # Fortschrittsbalken
 # terraOptions(memfrac = 0.8) # optional: RAM-Auslastung
 
@@ -159,7 +159,7 @@ if (ENGINE == "xgb") {
 # --- WALDMASKE LADEN & TRIMMEN ----------------------------------------------
 message("Loading forest mask and trimming to valid forest extent...")
 r_mask_full <- rast(FOREST_MASK)           # 1 = Wald, NA = kein Wald
-# trim entfernt umgebende NA-Ränder -> kleineres Ausmaß, rechen- & IO-schonend
+# trim entfernt umgebende NA-Ränder 
 r_mask <- trim(r_mask_full)                # Referenzgrid (CRS/Res/Alignment!)
 
 
