@@ -1,9 +1,10 @@
-# ========================== BACKCAST YSD FROM 1985 (FULL SCRIPT, TUNABLE RESOURCES) ==========================
+## ========================== BACKCAST YSD FROM 1985 (FULL SCRIPT, ROBUST PREDICT) ==========================
 # Global training on points; LOCAL inference on one BAP tile, restricted to forest (1/NA).
-# Predictors for 1985: (1) BAP b1..b6, (2) NBR1985 (single band).
+# Predictors 1985: (1) BAP b1..b6, (2) NBR1985 (single band).
 # Outputs: YSD (float + int), YOD (int), and CoE layers (median/agreement/spread).
-# Resource profile lets you train heavy (e.g., 30 threads) and predict with moderate tiling cores.
-# ============================================================================================================
+# Resource profile: train heavy; predict with moderate terra cores; RF/XGB predict single-threaded.
+# Uses getS3method('predict','ranger') to avoid non-exported symbol issues on workers.
+# ==========================================================================================================
 
 suppressPackageStartupMessages({
   library(data.table)
@@ -22,7 +23,7 @@ TRAIN_CSV     <- "/mnt/eo/EO4Backcasting/_intermediates/training_data.csv"
 TRAIN_PARQUET <- NULL
 TRAIN_RDS     <- NULL
 
-BAP_TILE_PATH <- "/mnt/dss_europe/level3_interpolated/X0016_Y0020/19850801_LEVEL3_LNDLG_IBAP.tif"  # 6 bands
+BAP_TILE_PATH <- "/mnt/dss_europe/level3_interpolated/X0021_Y0029/19850801_LEVEL3_LNDLG_IBAP.tif"  # 6 bands
 NBR1985_PATH  <- "/mnt/eo/eu_mosaics/NBR_comp/NBR_1985.tif"                                         # 1 band
 FOREST_MASK   <- "/mnt/eo/EFDA_v211/forest_landuse_aligned.tif"                                     # 1 = forest, NA = non-forest
 
@@ -32,43 +33,35 @@ AGE_MIN     <- 1
 AGE_MAX     <- 20
 
 # ---------------------------- VALUE SCALING ----------------------------------
-RESCALE_PTS_TO_0_1 <- FALSE   # if point bands are in 0..10000 but rasters are 0..1
-SCALE_RASTERS_BY   <- 1       # multiply rasters if needed (e.g., 0.0001 or 10000)
+RESCALE_PTS_TO_0_1 <- FALSE
+SCALE_RASTERS_BY   <- 1
 
 # --------------------------- MODEL ENGINES -----------------------------------
-ENGINE_BAP <- "rf"  # "rf" or "xgb" for 6-band BAP model
-ENGINE_NBR <- "rf"  # "rf" or "xgb" for 1-band NBR model
+ENGINE_BAP <- "rf"  # "rf" or "xgb"
+ENGINE_NBR <- "rf"  # "rf" or "xgb"
 
 set.seed(42)
 
 # =========================== RESOURCE PROFILE ================================
-# Machine: 48 cores available
-# Strategy: TRAIN heavy; PREDICT moderate-cores + single-thread model predict to avoid oversubscription.
-USE_FAST_PROFILE <- TRUE  # set FALSE to fall back to conservative safe mode
+USE_FAST_PROFILE <- TRUE  # TRUE = train heavy, predict moderately
 
 if (USE_FAST_PROFILE) {
-  # Training
   RF_THREADS_TRAIN   <- 30
   XGB_THREADS_TRAIN  <- 30
-  
-  # Prediction
-  TERRA_CORES_PRED   <- 8     # increase gradually (8–12) once stable
+  TERRA_CORES_PRED   <- 8
   RF_THREADS_PRED    <- 1
   XGB_THREADS_PRED   <- 1
   
-  Sys.setenv(OMP_NUM_THREADS      = "2",
-             MKL_NUM_THREADS      = "2",
-             OPENBLAS_NUM_THREADS = "2",
-             GDAL_NUM_THREADS     = "2")
+  Sys.setenv(OMP_NUM_THREADS="2", MKL_NUM_THREADS="2", OPENBLAS_NUM_THREADS="2", GDAL_NUM_THREADS="2")
   options(mc.cores = TERRA_CORES_PRED, ranger.num.threads = RF_THREADS_TRAIN)
-  terraOptions(progress = 1, memfrac = 0.75)  # more aggressive than safe mode
-  # terraOptions(tempdir = "/fast/tmp")      # optional: fast SSD temp
+  terraOptions(progress = 1, memfrac = 0.75)
 } else {
   RF_THREADS_TRAIN   <- 4
   XGB_THREADS_TRAIN  <- 4
   TERRA_CORES_PRED   <- 2
   RF_THREADS_PRED    <- 1
   XGB_THREADS_PRED   <- 1
+  
   Sys.setenv(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", GDAL_NUM_THREADS="1")
   options(mc.cores = 1, ranger.num.threads = RF_THREADS_TRAIN)
   terraOptions(progress = 1, memfrac = 0.6)
@@ -95,8 +88,13 @@ agree_pairs <- function(v, tol = 1) {
   combs <- combn(v, 2)
   sum(abs(combs[1, ] - combs[2, ]) <= tol)
 }
+
+# RF/XGB wrappers for terra::predict workers
 PRED_FUN_RF <- function(model, data, ...) {
-  as.numeric(predict(model, data = as.data.frame(data), num.threads = RF_THREADS_PRED)$predictions)
+  # explicit S3 method resolution avoids non-exported symbol issues on parallel workers
+  pred_fun <- getS3method("predict", "ranger")
+  preds <- pred_fun(model, data = as.data.frame(data), num.threads = RF_THREADS_PRED)
+  as.numeric(preds$predictions)
 }
 PRED_FUN_XGB <- function(model, data, ...) {
   predict(model, as.matrix(data), nthread = XGB_THREADS_PRED)
@@ -192,7 +190,7 @@ if (ENGINE_NBR == "rf") {
 } else if (ENGINE_NBR == "xgb") {
   message("Training XGBoost (NBR-only)…")
   X_nbr <- matrix(train$NBR, ncol = 1)
-  dtr   <- xgb.DMatrix(X_nbr, label = Y)   # optionally add weights = w
+  dtr   <- xgb.DMatrix(X_nbr, label = Y)
   params_nbr <- list(objective = "reg:squarederror", eval_metric = "rmse",
                      eta = 0.1, max_depth = 3, subsample = 0.9, colsample_bytree = 1.0,
                      nthread = XGB_THREADS_TRAIN)
@@ -200,25 +198,21 @@ if (ENGINE_NBR == "rf") {
   PRED_FUN_NBR <- PRED_FUN_XGB
 } else stop("ENGINE_NBR must be 'rf' or 'xgb'.")
 
-# Optionally persist:
-# saveRDS(model_bap, file.path(OUT_DIR, "model_bap.rds"))
-# saveRDS(model_nbr, file.path(OUT_DIR, "model_nbr.rds"))
-
 # ============================ LOCAL TILE PREP ================================
 message("Preparing BAP tile and forest mask…")
 r_bap <- rast(BAP_TILE_PATH)
 if (nlyr(r_bap) != 6) stop("BAP tile must have 6 bands.")
 names(r_bap) <- c("b1","b2","b3","b4","b5","b6")
 
-r_mask_full   <- rast(FOREST_MASK)
-r_mask_aligned<- align_to_grid(r_mask_full, r_bap, categorical = TRUE)
-r_mask_tile   <- crop(r_mask_aligned, r_bap)
-r_mask_tile   <- force_mask_1_NA(r_mask_tile)
+r_mask_full    <- rast(FOREST_MASK)
+r_mask_aligned <- align_to_grid(r_mask_full, r_bap, categorical = TRUE)
+r_mask_tile    <- crop(r_mask_aligned, r_bap)
+r_mask_tile    <- force_mask_1_NA(r_mask_tile)
 
 message("Aligning NBR to BAP grid…")
-r_nbr         <- rast(NBR1985_PATH); names(r_nbr) <- "NBR"
-r_nbr_bapgrid <- align_to_grid(r_nbr, r_bap, categorical = FALSE)
-r_nbr_tile    <- crop(r_nbr_bapgrid, r_bap)
+r_nbr          <- rast(NBR1985_PATH); names(r_nbr) <- "NBR"
+r_nbr_bapgrid  <- align_to_grid(r_nbr, r_bap, categorical = FALSE)
+r_nbr_tile     <- crop(r_nbr_bapgrid, r_bap)
 
 if (SCALE_RASTERS_BY != 1) {
   r_bap      <- r_bap * SCALE_RASTERS_BY
@@ -239,6 +233,9 @@ r_bap_masked <- rast(file.path(OUT_DIR, "BAP_1985_tile_forestOnly.tif"))
 r_nbr_masked <- rast(file.path(OUT_DIR, "NBR_1985_tile_forestOnly.tif"))
 
 stopifnot(terra::compareGeom(r_bap_masked, r_nbr_masked, stopOnError = TRUE))
+
+# Make sure 'ranger' is loaded on workers
+requireNamespace("ranger", quietly = TRUE)
 
 # ================================ PREDICTION ================================
 message("Predicting YSD on BAP tile (forest only)…")
@@ -302,8 +299,3 @@ ysd_sd <- app(
 
 message("Done.")
 message(sprintf("Outputs written to: %s", OUT_DIR))
-
-# ---------------------------- OPTIONAL CHECKS -------------------------------
-# print(r_bap_masked); print(r_nbr_masked)
-# q_bap <- as.data.frame(global(r_bap_masked, fun = quantile, na.rm = TRUE, probs = c(.01,.99)))
-# q_nbr <- as.data.frame(global(r_nbr_masked, fun = quantile, na.rm = TRUE, probs = c(.01,.99)))
