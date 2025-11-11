@@ -177,6 +177,7 @@ r_bap_a <- align_to_mask(r_bap, r_mask, method_bilinear = TRUE)
 r_nbr_a <- align_to_mask(r_nbr, r_mask, method_bilinear = TRUE)
 r_evi_a <- align_to_mask(r_evi, r_mask, method_bilinear = TRUE)
 
+
 # (optional) Skalenanpassung der Raster, falls nötig
 if (SCALE_RASTERS_BY != 1) {
   r_bap_a <- r_bap_a * SCALE_RASTERS_BY
@@ -184,7 +185,7 @@ if (SCALE_RASTERS_BY != 1) {
   r_evi_a <- r_evi_a * SCALE_RASTERS_BY
 }
 
-plot(r_evi_a)
+
 # --- ZUSCHNEIDEN & NUR WALD-PIXEL BEHALTEN -----------------------------------
 # Crop auf Masken-Ausmaß (nach trim), dann Maskierung (NA außerhalb Wald)
 message("Cropping rasters to mask extent and keeping only forest pixels...")
