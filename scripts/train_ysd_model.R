@@ -158,14 +158,14 @@ if (ENGINE == "xgb") {
 
 # --- WALDMASKE LADEN & TRIMMEN ----------------------------------------------
 message("Loading forest mask and trimming to valid forest extent...")
-r_mask_full <- rast(FOREST_MASK)           # 1 = Wald, NA = kein Wald
-# trim entfernt umgebende NA-Ränder 
-r_mask <- trim(r_mask_full)                # Referenzgrid (CRS/Res/Alignment!)
+r_mask_full <- rast(FOREST_MASK)          
+# trim entfernt 
+r_mask <- trim(r_mask_full)               
 
 
 # --- RASTER LADEN & EXAKT AUF MASKEN-GRID AUSRICHTEN ------------------------
 message("Loading rasters and aligning to trimmed mask grid...")
-r_bap  <- rast(BAP1985_PATH)                # 6 Bänder
+r_bap  <- rast(BAP1985_PATH)                
 if (nlyr(r_bap) != 6) stop("BAP1985 must have 6 bands.")
 names(r_bap) <- c("b1","b2","b3","b4","b5","b6")
 
@@ -184,6 +184,7 @@ if (SCALE_RASTERS_BY != 1) {
   r_evi_a <- r_evi_a * SCALE_RASTERS_BY
 }
 
+plot(r_evi_a)
 # --- ZUSCHNEIDEN & NUR WALD-PIXEL BEHALTEN -----------------------------------
 # Crop auf Masken-Ausmaß (nach trim), dann Maskierung (NA außerhalb Wald)
 message("Cropping rasters to mask extent and keeping only forest pixels...")
