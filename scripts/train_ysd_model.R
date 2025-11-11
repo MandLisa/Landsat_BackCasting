@@ -221,14 +221,16 @@ for (src_path in c(ysd_bap_path, ysd_nbr_path)) {
   writeStop(r_int); writeStop(r_yod)
 }
 
-# ===================== CONVERGENCE OF EVIDENCE (BLOCK-WISE) ==================
+# ===================== CONVERGENCE OF EVIDENCE (YSD + ENSEMBLE YOD) ==================
 r_bap_pred <- rast(ysd_bap_path)
 r_nbr_pred <- rast(ysd_nbr_path)
 
-ens_median_path <- file.path(OUT_DIR, "ysd_1985_tile_ensemble_median.tif")
-agree_pairs_path<- file.path(OUT_DIR, "ysd_1985_tile_agreement_pairs.tif")
-spread_iqr_path <- file.path(OUT_DIR, "ysd_1985_tile_spread_IQR.tif")
-spread_sd_path  <- file.path(OUT_DIR, "ysd_1985_tile_spread_SD.tif")
+ens_median_path      <- file.path(OUT_DIR, "ysd_1985_tile_ensemble_median.tif")
+agree_pairs_path     <- file.path(OUT_DIR, "ysd_1985_tile_agreement_pairs.tif")
+spread_iqr_path      <- file.path(OUT_DIR, "ysd_1985_tile_spread_IQR.tif")
+spread_sd_path       <- file.path(OUT_DIR, "ysd_1985_tile_spread_SD.tif")
+ens_median_int_path  <- file.path(OUT_DIR, "ysd_1985_tile_ensemble_median_int.tif")
+ens_median_yod_path  <- file.path(OUT_DIR, "yod_1985_tile_ensemble_median.tif")
 
 r_med <- rast(r_bap_pred, nlyrs=1); names(r_med) <- "median"
 r_agr <- rast(r_bap_pred, nlyrs=1); names(r_agr) <- "agree_pairs"
@@ -240,30 +242,48 @@ writeStart(r_agr, agree_pairs_path, overwrite=TRUE, wopt=wopt_flt)
 writeStart(r_iqr, spread_iqr_path, overwrite=TRUE, wopt=wopt_flt)
 writeStart(r_sd,  spread_sd_path,  overwrite=TRUE, wopt=wopt_flt)
 
+# Also prepare integer ensemble and YOD ensemble outputs
+r_med_i <- rast(r_bap_pred, nlyrs=1); names(r_med_i) <- "ysd_med_int"
+r_med_y <- rast(r_bap_pred, nlyrs=1); names(r_med_y) <- "yod_med"
+
+writeStart(r_med_i, ens_median_int_path, overwrite=TRUE, wopt=wopt_i16)
+writeStart(r_med_y, ens_median_yod_path, overwrite=TRUE, wopt=wopt_i16)
+
 readStart(r_bap_pred); readStart(r_nbr_pred)
 
 bs3 <- make_blocks(r_bap_pred, chunk=CHUNK_POST_ROWS)
-message(sprintf("Computing CoE in %d blocks…", bs3$n))
+message(sprintf("Computing CoE & ensemble YOD in %d blocks…", bs3$n))
 for (i in seq_len(bs3$n)) {
   a <- terra::readValues(r_bap_pred, row=bs3$row[i], nrows=bs3$nrows[i], mat=TRUE)[,1]
   b <- terra::readValues(r_nbr_pred, row=bs3$row[i], nrows=bs3$nrows[i], mat=TRUE)[,1]
   
-  med <- ifelse(is.finite(a) & is.finite(b), (a+b)/2, ifelse(is.finite(a), a, ifelse(is.finite(b), b, NA_real_)))
+  # Ensemble median (two-model mean), agreement, IQR, SD
+  med <- ifelse(is.finite(a) & is.finite(b), (a+b)/2,
+                ifelse(is.finite(a), a, ifelse(is.finite(b), b, NA_real_)))
   agr <- agree_pairs_vec(a, b, tol=1)
   iqr <- iqr_vec(a, b)
   sdv <- rep(NA_real_, length(a)); ok <- is.finite(a) & is.finite(b)
   sdv[ok] <- sqrt(((a[ok]-med[ok])^2 + (b[ok]-med[ok])^2)/2)
   
+  # Write CoE float layers
   terra::writeValues(r_med, med, start=bs3$row[i], nrows=bs3$nrows[i])
   terra::writeValues(r_agr, agr, start=bs3$row[i], nrows=bs3$nrows[i])
   terra::writeValues(r_iqr, iqr, start=bs3$row[i], nrows=bs3$nrows[i])
   terra::writeValues(r_sd,  sdv, start=bs3$row[i], nrows=bs3$nrows[i])
+  
+  # Convert ensemble YSD median to integer clamp and ensemble YOD (1985 - ysd_int)
+  med_int <- to_int_vec(med)
+  med_yod <- 1985 - med_int
+  
+  terra::writeValues(r_med_i, med_int, start=bs3$row[i], nrows=bs3$nrows[i])
+  terra::writeValues(r_med_y, med_yod, start=bs3$row[i], nrows=bs3$nrows[i])
   
   if (i %% 10 == 0) message(sprintf("  CoE block %d/%d", i, bs3$n))
 }
 
 readStop(r_bap_pred); readStop(r_nbr_pred)
 writeStop(r_med); writeStop(r_agr); writeStop(r_iqr); writeStop(r_sd)
+writeStop(r_med_i); writeStop(r_med_y)
 
 message("Done.")
 message(sprintf("Outputs written to: %s", OUT_DIR))
