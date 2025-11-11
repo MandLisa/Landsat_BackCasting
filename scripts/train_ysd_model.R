@@ -211,5 +211,161 @@ r_bap <- rast(BAP_TILE_PATH)
 if (nlyr(r_bap) != 6) stop("BAP tile must have 6 bands.")
 names(r_bap) <- c("b1","b2","b3","b4","b5","b6")
 
-r_mask_full    <
-  
+r_mask_full    <- rast(FOREST_MASK)
+r_mask_aligned <- align_to_grid(r_mask_full, r_bap, categorical = TRUE)
+r_mask_tile    <- crop(r_mask_aligned, r_bap)
+r_mask_tile    <- force_mask_1_NA(r_mask_tile)
+
+message("Aligning NBR to BAP grid…")
+r_nbr          <- rast(NBR1985_PATH); names(r_nbr) <- "NBR"
+r_nbr_bapgrid  <- align_to_grid(r_nbr, r_bap, categorical = FALSE)
+r_nbr_tile     <- crop(r_nbr_bapgrid, r_bap)
+
+if (SCALE_RASTERS_BY != 1) {
+  r_bap      <- r_bap * SCALE_RASTERS_BY
+  r_nbr_tile <- r_nbr_tile * SCALE_RASTERS_BY
+}
+
+message("Masking predictors to forest…")
+r_bap_masked <- mask(r_bap, r_mask_tile)
+r_nbr_masked <- mask(r_nbr_tile, r_mask_tile)
+
+writeRaster(r_bap_masked, file.path(OUT_DIR, "BAP_1985_tile_forestOnly.tif"),
+            overwrite = TRUE, wopt = wopt_flt)
+writeRaster(r_nbr_masked, file.path(OUT_DIR, "NBR_1985_tile_forestOnly.tif"),
+            overwrite = TRUE, wopt = wopt_flt)
+
+# Re-open from disk to force on-disk tiling
+r_bap_masked <- rast(file.path(OUT_DIR, "BAP_1985_tile_forestOnly.tif"))
+r_nbr_masked <- rast(file.path(OUT_DIR, "NBR_1985_tile_forestOnly.tif"))
+
+stopifnot(terra::compareGeom(r_bap_masked, r_nbr_masked, stopOnError = TRUE))
+
+# ====================== PREDICTION VIA clusterR (ranger-safe) ======================
+message("Setting up cluster for prediction…")
+cl <- parallel::makeCluster(CLUSTER_WORKERS, type = "PSOCK")
+parallel::clusterEvalQ(cl, {
+  suppressPackageStartupMessages(library(terra))
+  suppressPackageStartupMessages(library(ranger))
+  TRUE
+})
+
+# Worker-safe ranger prediction (calls non-exported S3 via asNamespace)
+pred_fun_ranger <- function(data_block, model) {
+  pr <- get("predict.ranger", envir = asNamespace("ranger"))
+  out <- pr(model, data = as.data.frame(data_block), num.threads = 1)
+  as.numeric(out$predictions)
+}
+
+# 1) BAP prediction (6 bands)
+message("Predicting YSD on BAP tile (forest only)…")
+if (ENGINE_BAP == "rf") {
+  ysd_bap_tile <- terra::clusterR(
+    r_bap_masked[[c("b1","b2","b3","b4","b5","b6")]],
+    fun = terra::predict,
+    args = list(
+      model    = model_bap,
+      fun      = function(m, d, ...) pred_fun_ranger(d, m),
+      filename = file.path(OUT_DIR, "ysd_1985_BAP_tile.tif"),
+      overwrite= TRUE,
+      wopt     = wopt_flt
+    ),
+    cl = cl
+  )
+} else {
+  # XGB path (no S3 issues)
+  ysd_bap_tile <- terra::clusterR(
+    r_bap_masked[[c("b1","b2","b3","b4","b5","b6")]],
+    fun = terra::predict,
+    args = list(
+      model    = model_bap,
+      fun      = function(m, d, ...) PRED_FUN_XGB(m, d),
+      filename = file.path(OUT_DIR, "ysd_1985_BAP_tile.tif"),
+      overwrite= TRUE,
+      wopt     = wopt_flt
+    ),
+    cl = cl
+  )
+}
+
+# 2) NBR prediction (single band)
+message("Predicting YSD on NBR tile (forest only)…")
+if (ENGINE_NBR == "rf") {
+  ysd_nbr_tile <- terra::clusterR(
+    r_nbr_masked,
+    fun = terra::predict,
+    args = list(
+      model    = model_nbr,
+      fun      = function(m, d, ...) pred_fun_ranger(d, m),
+      filename = file.path(OUT_DIR, "ysd_1985_NBR_tile.tif"),
+      overwrite= TRUE,
+      wopt     = wopt_flt
+    ),
+    cl = cl
+  )
+} else {
+  ysd_nbr_tile <- terra::clusterR(
+    r_nbr_masked,
+    fun = terra::predict,
+    args = list(
+      model    = model_nbr,
+      fun      = function(m, d, ...) PRED_FUN_XGB(m, d),
+      filename = file.path(OUT_DIR, "ysd_1985_NBR_tile.tif"),
+      overwrite= TRUE,
+      wopt     = wopt_flt
+    ),
+    cl = cl
+  )
+}
+
+# Close cluster after predictions
+parallel::stopCluster(cl)
+
+# ========================= INTEGERIZATION + YOD =============================
+ysd_bap_i <- to_int(ysd_bap_tile)
+writeRaster(ysd_bap_i, file.path(OUT_DIR, "ysd_1985_BAP_tile_int.tif"),
+            overwrite = TRUE, wopt = wopt_i16)
+writeRaster(1985 - ysd_bap_i, file.path(OUT_DIR, "yod_1985_BAP_tile.tif"),
+            overwrite = TRUE, wopt = wopt_i16)
+
+ysd_nbr_i <- to_int(ysd_nbr_tile)
+writeRaster(ysd_nbr_i, file.path(OUT_DIR, "ysd_1985_NBR_tile_int.tif"),
+            overwrite = TRUE, wopt = wopt_i16)
+writeRaster(1985 - ysd_nbr_i, file.path(OUT_DIR, "yod_1985_NBR_tile.tif"),
+            overwrite = TRUE, wopt = wopt_i16)
+
+# ===================== CONVERGENCE OF EVIDENCE (LOCAL) ======================
+message("Computing ensemble and uncertainty layers…")
+ysd_stack <- c(ysd_bap_tile, ysd_nbr_tile)
+
+ysd_ens_median <- app(
+  ysd_stack, median, na.rm = TRUE, cores = CLUSTER_WORKERS,
+  filename = file.path(OUT_DIR, "ysd_1985_tile_ensemble_median.tif"),
+  overwrite = TRUE, wopt = wopt_flt
+)
+
+ysd_agree <- app(
+  ysd_stack, agree_pairs, na.rm = TRUE, cores = CLUSTER_WORKERS,
+  filename = file.path(OUT_DIR, "ysd_1985_tile_agreement_pairs.tif"),
+  overwrite = TRUE
+)
+
+ysd_iqr <- app(
+  ysd_stack, IQR, na.rm = TRUE, cores = CLUSTER_WORKERS,
+  filename = file.path(OUT_DIR, "ysd_1985_tile_spread_IQR.tif"),
+  overwrite = TRUE, wopt = wopt_flt
+)
+
+ysd_sd <- app(
+  ysd_stack, sd, na.rm = TRUE, cores = CLUSTER_WORKERS,
+  filename = file.path(OUT_DIR, "ysd_1985_tile_spread_SD.tif"),
+  overwrite = TRUE, wopt = wopt_flt
+)
+
+message("Done.")
+message(sprintf("Outputs written to: %s", OUT_DIR))
+
+# ---------------------------- OPTIONAL CHECKS -------------------------------
+# print(r_bap_masked); print(r_nbr_masked)
+# q_bap <- as.data.frame(global(r_bap_masked, fun = quantile, na.rm = TRUE, probs = c(.01,.99)))
+# q_nbr <- as.data.frame(global(r_nbr_masked, fun = quantile, na.rm = TRUE, probs = c(.01,.99)))
