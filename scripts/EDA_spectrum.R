@@ -39,6 +39,9 @@ if (!same.crs(r_yod, r_forest)) {
   r_yod <- resample(r_yod, r_forest, method = "near")
 }
 
+# Write to disk
+writeRaster(r_yod, "/mnt/eo/EFDA_v211/yod_aligned.tif")
+
 # --------- normalize forest mask to 1 / NA ---------
 # (treat any value >0.5 as forest = 1; else NA)
 r_forest01 <- classify(r_forest, rbind(c(-Inf,0.5,NA), c(0.5,Inf,1)))
