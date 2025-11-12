@@ -210,11 +210,10 @@ ggplot(long_plot, aes(x = band, y = val, fill = group)) +
 
 ggsave(
   filename = "/mnt/eo/EO4Backcasting/_figs/spectral_profile_boxplots.jpg",
-  width = 8,         # in inches
+  width = 8,      
   height = 4,
   units = "in",
-  dpi = 300          # high-quality for publication
-)
+  dpi = 300        
 
 
 
