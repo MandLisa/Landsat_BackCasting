@@ -95,3 +95,91 @@ fwrite(both, OUT_CSV)
 
 
 
+### ploot
+# ----------------- assumptions -----------------
+# 'both' has at least: state ∈ {"healthy","disturbed"}, b1..b6, and (for disturbed) ysd
+stopifnot(exists("both"))
+band_cols <- paste0("b", 1:6)
+stopifnot(all(band_cols %in% names(both)), "state" %in% names(both))
+
+# If BAP are scaled integers (e.g., ×10000), set SCALE accordingly
+SCALE <- 1  # set to 10000 if you want reflectance in [0,1]
+
+
+DT <- as.data.table(both)
+band_cols <- paste0("b", 1:6)
+SCALE <- 1          # set to 10000 if BAP are scaled integers
+
+# Ensure grouping exists (healthy vs YSD bins)
+if (!"group" %in% names(DT)) {
+  DT[, group := fifelse(
+    state == "healthy", "healthy",
+    as.character(cut(
+      ysd, breaks=c(0,5,10,15,20,Inf), right=TRUE,
+      labels=c("ysd 1–5","ysd >5–10","ysd >10–15","ysd >15–20","ysd >20")
+    ))
+  )]
+}
+DT <- DT[!is.na(group)]
+
+# Melt correctly: specify measure.vars, then scale
+long <- melt(
+  DT,
+  measure.vars = band_cols,
+  variable.name = "band",
+  value.name = "val"
+)[, val := val / SCALE]
+
+# Aggregate mean spectra
+spec_means <- long[, .(mean_val = mean(val, na.rm = TRUE)), by = .(group, band)]
+spec_means[, band  := factor(band, levels = band_cols)]
+spec_means[, group := factor(group, levels = c("healthy","ysd 1–5","ysd >5–10","ysd >10–15","ysd >15–20","ysd >20"))]
+
+# Plot: healthy thick, YSD bins coloured
+spec_means[, group := factor(group,
+                             levels = c("healthy","ysd 1–5","ysd >5–10","ysd >10–15","ysd >15–20","ysd >20"))]
+
+
+ggplot(spec_means, aes(band, mean_val, group = group,
+                       color = group, size = group, linetype = group)) +
+  geom_line() +
+  geom_point() +
+  scale_color_manual(values = c(
+    "healthy"   = "black",
+    "ysd 1–5"   = "#d62728",
+    "ysd >5–10" = "#ff7f0e",
+    "ysd >10–15"= "#2ca02c",
+    "ysd >15–20"= "#9467bd",
+    "ysd >20"   = "#8c564b"
+  )) +
+  scale_size_manual(values = c(
+    "healthy"   = 1.6,
+    "ysd 1–5"   = 0.7,
+    "ysd >5–10" = 0.7,
+    "ysd >10–15"= 0.7,
+    "ysd >15–20"= 0.7,
+    "ysd >20"   = 0.7
+  ), guide = "none") +                 # hide size legend if you want
+  scale_linetype_manual(values = c(
+    "healthy"   = "solid",
+    "ysd 1–5"   = "dashed",
+    "ysd >5–10" = "dashed",
+    "ysd >10–15"= "dashed",
+    "ysd >15–20"= "dashed",
+    "ysd >20"   = "dashed"
+  )) +
+  labs(x="Band", y="Mean BAP value", color="Group", linetype="Group",
+       title="") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+
+
+
+
+
+
+
+
+
+
