@@ -173,6 +173,48 @@ ggplot(spec_means, aes(band, mean_val, group = group,
   theme_minimal(base_size = 12) +
   theme(legend.position = "right")
 
+ggsave(
+  filename = "/mnt/eo/EO4Backcasting/_figs/spectral_profile.jpg",
+  width = 8,         # in inches
+  height = 4,
+  units = "in",
+  dpi = 300          # high-quality for publication
+)
+
+
+
+### boxplot
+pal <- c("healthy"   = "black",
+             "ysd 1–5"   = "#d62728",
+             "ysd >5–10" = "#ff7f0e",
+             "ysd >10–15"= "#2ca02c",
+             "ysd >15–20"= "#9467bd",
+             "ysd >20"   = "#8c564b")
+
+# Plot: healthy thick, YSD bins coloured
+# 1) Define desired order once
+lvl <- c("healthy","ysd 1–5","ysd >5–10","ysd >10–15","ysd >15–20","ysd >20")
+
+# 2) Apply to the plotted data
+long_plot[, group := factor(group, levels = lvl)]   # data.table syntax
+
+# boxplot
+ggplot(long_plot, aes(x = band, y = val, fill = group)) +
+  geom_boxplot(outlier.alpha = 0.2, width = 0.75,
+               position = position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = pal, breaks = lvl) +
+  labs(x = "Band", y = "Mean BAP value", fill = "Group",
+       title = "") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+ggsave(
+  filename = "/mnt/eo/EO4Backcasting/_figs/spectral_profile_boxplots.jpg",
+  width = 8,         # in inches
+  height = 4,
+  units = "in",
+  dpi = 300          # high-quality for publication
+)
 
 
 
