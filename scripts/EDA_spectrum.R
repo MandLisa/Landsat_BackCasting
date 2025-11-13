@@ -57,3 +57,17 @@ writeRaster(undist_forest, OUT_PATH, overwrite = TRUE, wopt = wopt_u8)
 message("Wrote undisturbed forest raster to: ", OUT_PATH)
 
 
+# plot spectrum
+
+# load long_plot
+# read
+long_plot <- readRDS("/mnt/eo/EO4Backcasting/_intermediates/long_plot.rds")
+
+ggplot(long_plot, aes(x = band, y = val, fill = group)) +
+  geom_boxplot(outlier.alpha = 0.2, width = 0.75,
+               position = position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = pal, breaks = lvl) +
+  labs(x = "Band", y = "BAP", fill = "Group",
+       title = "BAP distributions by band: healthy vs. YSD bins") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
