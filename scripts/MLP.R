@@ -1,7 +1,20 @@
-# install.packages("keras")
 library(keras)
 library(dplyr)
+library(tensorflow)
+library(reticulate)
+library(data.table)
 
+#------------------------------------------------------------------------------
+## ---- TensorFlow / keras setup ----
+library(reticulate)
+use_virtualenv("r-tf-mlp", required = TRUE)
+
+# Quick test:
+tf$constant(1)
+py_config()
+
+
+#-------------------------------------------------------------------------------
 # for reproducibility
 set.seed(1234)
 
@@ -18,9 +31,10 @@ train_dist <- train_df %>%
     !is.na(class_label)
   )
 
-### 3. Build predictor matrix and target (one-hot encoded)
-# predictor columns
-pred_cols <- c("EVI", "NBR", "b1", "b2", "b3", "b4", "b5", "b6")
+# 3. Build predictor matrix and target (one-hot encoded)
+#    → ONLY spectral bands b1–b6 (no EVI, no NBR)
+
+pred_cols <- c("b1", "b2", "b3", "b4", "b5", "b6")
 
 X <- train_dist %>%
   select(all_of(pred_cols)) %>%
@@ -33,22 +47,23 @@ X_sd   <- apply(X, 2, sd, na.rm = TRUE)
 X_scaled <- scale(X, center = X_mean, scale = X_sd)
 
 # target: ysd class as factor
-y_factor <- factor(train_dist$class_label)
+y_factor     <- factor(train_dist$class_label)
 class_levels <- levels(y_factor)
-n_classes <- length(class_levels)
+n_classes    <- length(class_levels)
 
 # keras wants integers 0..(n_classes-1)
 y_int <- as.integer(y_factor) - 1L
 y_cat <- to_categorical(y_int, num_classes = n_classes)
 
+#------------------------------------------------------------------------------
+# 4. Train–validation split
 
-### 4. Train - validation split
 set.seed(1234)
-n <- nrow(X_scaled)
+n   <- nrow(X_scaled)
 idx <- sample(seq_len(n))
 
 train_frac <- 0.8
-n_train <- floor(train_frac * n)
+n_train    <- floor(train_frac * n)
 
 idx_train <- idx[1:n_train]
 idx_val   <- idx[(n_train + 1):n]
@@ -59,8 +74,9 @@ X_val   <- X_scaled[idx_val,   , drop = FALSE]
 y_train <- y_cat[idx_train, , drop = FALSE]
 y_val   <- y_cat[idx_val,   , drop = FALSE]
 
+#------------------------------------------------------------------------------
+# 5. Define MLP
 
-### 5. Define MLP
 input_dim <- ncol(X_train)
 
 model <- keras_model_sequential() %>%
@@ -74,15 +90,16 @@ model <- keras_model_sequential() %>%
   layer_dense(units = n_classes, activation = "softmax")
 
 model %>% compile(
-  loss = "categorical_crossentropy",
+  loss      = "categorical_crossentropy",
   optimizer = optimizer_adam(learning_rate = 0.001),
-  metrics = "accuracy"
+  metrics   = "accuracy"
 )
 
 summary(model)
 
+#------------------------------------------------------------------------------
+# 6. Fit model
 
-### 6. Fit model
 history <- model %>% fit(
   x = X_train,
   y = y_train,
@@ -101,16 +118,15 @@ history <- model %>% fit(
 # optional: inspect training
 plot(history)
 
+#------------------------------------------------------------------------------
+# 7. Backcast for 1990 BAP (undisturbed pixels, bands only)
 
-### 7. Backcast for 1990 BAP
-# data frame with undisturbed pixels in 1990
 pred_1990 <- train_df %>%
   filter(
     state == "undisturbed",
     year == 1990,
     bap_available
   ) %>%
-  # keep coordinates & predictors
   select(id, x, y, year, all_of(pred_cols))
 
 # predictor matrix (apply same scaling as training!)
@@ -134,17 +150,17 @@ pred_1990$pred_ysd_bin <- pred_class
 
 head(pred_1990)
 
+#------------------------------------------------------------------------------
+# 8. Save model and scale metadata
 
-### 8. Save model and scale metadata
-save_model_hdf5(model, "mlp_backcast_ysd_bins.h5")
+save_model_hdf5(model, "mlp_backcast_ysd_bins_bands_only.h5")
 
 saveRDS(
   list(
-    mean = X_mean,
-    sd = X_sd,
-    levels = class_levels,
+    mean      = X_mean,
+    sd        = X_sd,
+    levels    = class_levels,
     pred_cols = pred_cols
   ),
-  file = "mlp_backcast_meta.rds"
+  file = "mlp_backcast_meta_bands_only.rds"
 )
-
