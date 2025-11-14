@@ -1,11 +1,16 @@
 # ======================================================================
 # 0. Setup
 # ======================================================================
+library(reticulate)
+use_virtualenv("r-tf-mlp", required = TRUE)
+py_config()
 
 library(data.table)
 library(dplyr)
 library(keras)
 library(tensorflow)
+tf$constant(1)
+
 library(pROC)
 set.seed(1234)
 
