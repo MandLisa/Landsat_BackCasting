@@ -237,7 +237,7 @@ cat("Class map: ", class_file, "\n")
 
 #-------------------------------------------------------------------------------
 # load forest mask
-forest_mask <- rast("/mnt/eo/EFDA_v211/undisturbed_forest.tif")
+forest_mask <- rast("/mnt/eo/EFDA_v211/forest_landuse_aligned.tif")
 forest_mask <- classify(forest_mask, cbind(0, NA))
 
 # crop forest mask to r_bap extent
