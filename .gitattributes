@@ -7,9 +7,9 @@
 *.js linguist-language=JavaScript
 *.js linguist-weight=0.6
 
-# --- HTML nur schwach gewichten (aber NICHT entfernen) ---
-*.html linguist-weight=0.1
-*.htm linguist-weight=0.1
+# --- HTML nur schwach gewichten  ---
+*.html linguist-weight=0.15
+*.htm linguist-weight=0.15
 
 # --- R sehr schwach, aber sichtbar ---
 *.R linguist-language=R
@@ -17,5 +17,5 @@
 *.Rmd linguist-weight=0.05
 
 # --- Shell minimal ---
-*.sh linguist-weight=0.05
+*.sh linguist-weight=0.1
 
