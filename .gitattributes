@@ -1,0 +1,10 @@
+# --- Promote Python as main language ---
+*.py linguist-language=Python
+*.py linguist-detectable=true
+
+# --- Downweight R scripts ---
+*.R linguist-weight=0.1
+*.Rmd linguist-weight=0.1
+
+# --- Optional: notebooks only weakly counted ---
+*.ipynb linguist-weight=0.3
