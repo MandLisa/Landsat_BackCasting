@@ -297,9 +297,9 @@ for (thr in thresholds) {
 
 
 # classification
-threshold <- 0.9
-class_r <- prob_r >= threshold
+# threshold <- 0.9
+# class_r <- prob_r >= threshold
 
-writeRaster(class_r, class_file, overwrite=TRUE)
+# writeRaster(class_r, class_file, overwrite=TRUE)
 
 
