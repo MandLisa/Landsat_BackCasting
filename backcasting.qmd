@@ -1,0 +1,127 @@
+---
+title: "Backcasting"
+format: html
+editor: visual
+---
+
+## Probability map (RF)
+
+
+```{r}
+#| echo: false
+## Interactive Probability Map
+
+library(terra)
+library(leaflet)
+
+r <- rast("/mnt/eo/EO4Backcasting/_predictions/bap1990_prob_crop.tif")
+
+if (crs(r) != "EPSG:4326") {
+  r_wgs <- project(r, "EPSG:4326")
+} else {
+  r_wgs <- r
+}
+
+pal <- colorNumeric("viridis", values(r_wgs), na.color = "transparent")
+
+leaflet() |> 
+   addProviderTiles("Esri.WorldImagery") |> 
+  addRasterImage(r_wgs, colors = pal, opacity = 0.8) |> 
+  addLegend(pal = pal, values = values(r_wgs), title = "Probability")
+```
+
+## Threshold = 0.5
+
+```{r}
+#| echo: false
+
+r_05 <- rast("/mnt/eo/EO4Backcasting/_predictions/th_05.tif")
+
+if (crs(r_05) != "EPSG:4326") {
+  r_wgs_05 <- project(r_05, "EPSG:4326")
+} else {
+  r_wgs_05 <- r_05
+}
+
+r_mask <- classify(r_05, rcl = matrix(c(0, NA, 1, 1), ncol = 2, byrow = TRUE))
+
+pal <- colorFactor(
+  palette = c("yellow"),
+  domain = c(1),
+  na.color = "transparent"
+)
+
+# 5. Leaflet map with aerial background
+leaflet() |>
+  addProviderTiles("Esri.WorldImagery") |>         # AERIAL IMAGERY 🌍
+  addRasterImage(r_mask, colors = pal, opacity = 1) |>
+  addLegend(
+    pal = pal,
+    values = c(1),
+    title = "Disturbed (1975 - 1990"
+  )
+```
+
+## Threshold = 0.75
+
+```{r}
+#| echo: false
+
+r_075 <- rast("/mnt/eo/EO4Backcasting/_predictions/th_075.tif")
+
+if (crs(r_075) != "EPSG:4326") {
+  r_wgs_075 <- project(r_075, "EPSG:4326")
+} else {
+  r_wgs_075 <- r_075
+}
+
+r_mask <- classify(r_075, rcl = matrix(c(0, NA, 1, 1), ncol = 2, byrow = TRUE))
+
+pal <- colorFactor(
+  palette = c("yellow"),
+  domain = c(1),
+  na.color = "transparent"
+)
+
+# 5. Leaflet map with aerial background
+leaflet() |>
+  addProviderTiles("Esri.WorldImagery") |>         # AERIAL IMAGERY 🌍
+  addRasterImage(r_mask, colors = pal, opacity = 1) |>
+  addLegend(
+    pal = pal,
+    values = c(1),
+    title = "Disturbed (1975 - 1990"
+  )
+```
+
+## Threshold = 0.9
+
+```{r}
+#| echo: false
+
+r_09 <- rast("/mnt/eo/EO4Backcasting/_predictions/th_09.tif")
+
+if (crs(r_09) != "EPSG:4326") {
+  r_wgs_09 <- project(r_09, "EPSG:4326")
+} else {
+  r_wgs_09 <- r_09
+}
+
+r_mask <- classify(r_09, rcl = matrix(c(0, NA, 1, 1), ncol = 2, byrow = TRUE))
+
+pal <- colorFactor(
+  palette = c("yellow"),
+  domain = c(1),
+  na.color = "transparent"
+)
+
+# 5. Leaflet map with aerial background
+leaflet() |>
+  addProviderTiles("Esri.WorldImagery") |>         # AERIAL IMAGERY 🌍
+  addRasterImage(r_mask, colors = pal, opacity = 1) |>
+  addLegend(
+    pal = pal,
+    values = c(1),
+    title = "Disturbed (1975 - 1990"
+  )
+```
