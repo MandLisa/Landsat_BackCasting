@@ -11,10 +11,11 @@
 *.js linguist-language=JavaScript
 *.js linguist-weight=0.5
 
-# --- R sehr schwach, aber sichtbar ---
+# --- R extremely weak  ---
 *.R linguist-language=R
-*.R linguist-weight=0.05
-*.Rmd linguist-weight=0.05
+*.R linguist-weight=0.005
+*.Rmd linguist-weight=0.005
+
 
 # --- Shell minimal ---
 *.sh linguist-weight=0.2
