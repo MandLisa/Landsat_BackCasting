@@ -13,8 +13,8 @@
 
 # --- R extremely weak  ---
 *.R linguist-language=R
-*.R linguist-weight=0.005
-*.Rmd linguist-weight=0.005
+*.R linguist-weight=0.001
+*.Rmd linguist-weight=0.001
 
 
 # --- Shell minimal ---
