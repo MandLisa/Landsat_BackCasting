@@ -4,7 +4,7 @@
 
 # --- Python dominant machen ---
 *.py linguist-language=Python
-*.py linguist-weight=1.0
+*.py linguist-weight=5.0
 *.py linguist-detectable=true
 
 # --- JavaScript moderat gewichten ---
@@ -12,8 +12,8 @@
 *.js linguist-weight=0.5
 
 # --- HTML nur schwach gewichten  ---
-*.html linguist-weight=0.15
-*.htm linguist-weight=0.15
+*.html linguist-weight=0.3
+*.htm linguist-weight=0.3
 
 # --- R sehr schwach, aber sichtbar ---
 *.R linguist-language=R
