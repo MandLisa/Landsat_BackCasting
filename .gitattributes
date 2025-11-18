@@ -1,3 +1,7 @@
+# HTML is generated → do not count
+*.html linguist-generated=true
+*.htm linguist-generated=true
+
 # --- Python dominant machen ---
 *.py linguist-language=Python
 *.py linguist-weight=1.0
