@@ -4,7 +4,7 @@
 
 # --- Python dominant machen ---
 *.py linguist-language=Python
-*.py linguist-weight=10.0
+*.py linguist-weight=50.0
 *.py linguist-detectable=true
 
 # --- JavaScript moderat gewichten ---
