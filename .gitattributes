@@ -11,10 +11,6 @@
 *.js linguist-language=JavaScript
 *.js linguist-weight=0.5
 
-# --- HTML nur schwach gewichten  ---
-*.html linguist-weight=0.3
-*.htm linguist-weight=0.3
-
 # --- R sehr schwach, aber sichtbar ---
 *.R linguist-language=R
 *.R linguist-weight=0.05
