@@ -6,6 +6,7 @@
 library(data.table)
 library(ranger)
 library(caret)
+library(pROC)
 
 # ===============================================================
 # 1. Load long-format BAP dataset
@@ -19,93 +20,157 @@ DT <- fread("/mnt/eo/EO4Backcasting/_intermediates/training_healthy_disturbed_19
 setorder(DT, ID, year)
 
 # ==============================================================
-# 1. DEFINE INPUT- AND TARGET-YEAR OFFSETS
+# 1. DIST-Spalte erzeugen (binär!)
 # ==============================================================
 
-# Input-Offsets: t0, t1, t2, t3, t4, t5
-input_lags <- 0:5
-
-# Target-Offsets: t-1, t-2, t-3, t-4, t-5
-target_lags <- 1:5
-
-band_cols <- c("blue","green","red","nir","swir1","swir2")
-
-
-# ==============================================================
-# 2. FUNCTION TO CREATE SEQUENCES FOR ONE PIXEL
-# ==============================================================
-
-make_sequences <- function(df_pixel) {
-  
-  # df_pixel: nur ein Pixel, mehrere Jahre
-  
-  years <- df_pixel$year
-  out <- list()
-  idx <- 1
-  
-  for (t0 in years) {
-    
-    # Input years t0..t5
-    yrs_in <- t0 + input_lags
-    if (!all(yrs_in %in% years))
-      next
-    
-    # Target years t-1..t-5
-    yrs_tar <- t0 - target_lags
-    if (!all(yrs_tar %in% years))
-      next
-    
-    # Input-Matrix zusammenstellen
-    input_vals <- df_pixel[year %in% yrs_in][order(year), ..band_cols]
-    input_vals <- as.numeric(as.matrix(input_vals))
-    
-    # Targets (eine pro lag)
-    targets <- sapply(target_lags, function(k) {
-      df_pixel[year == (t0 - k), dist]  # oder falls du Targets ≠ dist willst, hier anpassen
-    })
-    
-    out[[idx]] <- data.table(
-      ID = df_pixel$ID[1],
-      t0_year = t0,
-      matrix(input_vals, nrow = 1,
-             dimnames = list(NULL, paste0(rep(band_cols, each=6), "_t", input_lags))),
-      matrix(targets, nrow = 1,
-             dimnames = list(NULL, paste0("dist_t", target_lags)))
-    )
-    
-    idx <- idx + 1
-  }
-  
-  if (length(out) == 0) return(NULL)
-  
-  return(rbindlist(out))
+if (!"dist" %in% names(DT)) {
+  message("Generating disturbance indicator 'dist' ...")
+  DT[, dist := as.integer(year == yod)]
+  DT[is.na(yod), dist := 0]   # undisturbed
 }
 
 
-# ==============================================================
-# 3. APPLY FUNCTION TO ALL PIXELS
-# ==============================================================
-DT[, dist := as.integer(year == yod)]
-DT[is.na(yod), dist := 0]   # undisturbed pixels
+# ===============================================================
+# 2. Create multi-horizon targets: dist_t1 ... dist_t5
+# ===============================================================
+target_horizons <- 1:5
 
+for (h in target_horizons) {
+  colname <- paste0("dist_t", h)
+  DT[, (colname) := as.integer(ysd == h)]
+  DT[, (colname) := factor(get(colname), levels = c(0,1))]
+}
 
-message("Building sequences for each pixel...")
+# Predictor bands
+band_cols <- c("blue","green","red","nir","swir1","swir2")
 
-SEQ <- DT[, make_sequences(.SD), by = ID]
+# ===============================================================
+# 3. TRAIN/TEST split by pixel ID
+# ===============================================================
+set.seed(42)
 
-# Entferne leere Gruppen
-SEQ <- SEQ[!is.na(ID)]
+IDs <- unique(DT$ID)
+test_IDs  <- sample(IDs, size = 0.30 * length(IDs))  # 30% test data
+train_IDs <- setdiff(IDs, test_IDs)
 
-message("Done. Total sequences: ", nrow(SEQ))
+TRAIN <- DT[ID %in% train_IDs]
+TEST  <- DT[ID %in% test_IDs]
 
+message("TRAIN rows: ", nrow(TRAIN))
+message("TEST rows : ", nrow(TEST))
 
-# ==============================================================
-# 4. SAVE OUTPUT
-# ==============================================================
+# ===============================================================
+# 4. TRAIN MODELS FOR EACH HORIZON
+# ===============================================================
+models <- list()
 
-OUT <- "/mnt/eo/EO4Backcasting/_intermediates/sequence_data_t0_t5_to_tminus.csv"
-fwrite(SEQ, OUT)
+for (h in target_horizons) {
+  
+  target_col <- paste0("dist_t", h)
+  message("\nTraining model for ", target_col)
+  
+  # Ensure target is factor
+  TRAIN[[target_col]] <- factor(TRAIN[[target_col]], levels=c(0,1))
+  
+  rf <- ranger(
+    formula = as.formula(paste0(target_col, " ~ .")),
+    data = TRAIN[, c(target_col, band_cols), with = FALSE],
+    num.trees = 500,
+    mtry = 3,
+    probability = TRUE,
+    importance = "impurity",
+    seed = 42
+  )
+  
+  models[[target_col]] <- rf
+}
 
-message("🎉 Sequences saved to: ", OUT)
+# ===============================================================
+# 5. VALIDATION FUNCTION
+# ===============================================================
+validate_model <- function(model, test_df, target_col) {
+  
+  df <- copy(test_df[, c(target_col, band_cols), with=FALSE])
+  df[[target_col]] <- factor(df[[target_col]], levels=c(0,1))
+  
+  preds <- predict(model, df[, ..band_cols])$predictions
+  prob  <- preds[, "1"]
+  pred_class <- factor(ifelse(prob > 0.5, 1, 0), levels=c(0,1))
+  
+  cm <- confusionMatrix(pred_class, df[[target_col]])
+  auc_val <- auc(df[[target_col]], prob)
+  
+  list(
+    cm = cm,
+    auc = auc_val
+  )
+}
 
+# ===============================================================
+# 6. VALIDATE ALL MODELS
+# ===============================================================
+validation_results <- list()
 
+for (h in target_horizons) {
+  
+  target_col <- paste0("dist_t", h)
+  message("\nValidating ", target_col)
+  
+  res <- validate_model(models[[target_col]], TEST, target_col)
+  validation_results[[target_col]] <- res
+  
+  print(res$cm)
+  cat("AUC:", res$auc, "\n")
+}
+
+# ===============================================================
+# 7. PERFORMANCE SUMMARY TABLE
+# ===============================================================
+summary_list <- list()
+
+for (h in target_horizons) {
+  
+  target_col <- paste0("dist_t", h)
+  res <- validation_results[[target_col]]
+  
+  cm <- res$cm
+  auc_val <- res$auc
+  
+  summary_list[[target_col]] <- data.table(
+    horizon = h,
+    accuracy = cm$overall["Accuracy"],
+    kappa = cm$overall["Kappa"],
+    sensitivity = cm$byClass["Sensitivity"],
+    specificity = cm$byClass["Specificity"],
+    precision = cm$byClass["Pos Pred Value"],
+    recall = cm$byClass["Sensitivity"],
+    f1 = 2 * (cm$byClass["Pos Pred Value"] * cm$byClass["Sensitivity"]) /
+      (cm$byClass["Pos Pred Value"] + cm$byClass["Sensitivity"]),
+    AUC = auc_val
+  )
+}
+
+perf_table <- rbindlist(summary_list)
+print(perf_table)
+
+# Save summary
+fwrite(perf_table,
+       "/mnt/eo/EO4Backcasting/_models/backcast_performance_summary.csv")
+
+# ===============================================================
+# 8. SAVE TRAINED MODELS
+# ===============================================================
+OUTDIR <- "/mnt/eo/EO4Backcasting/_models/"
+dir.create(OUTDIR, showWarnings = FALSE)
+
+for (h in target_horizons) {
+  
+  target_col <- paste0("dist_t", h)
+  
+  saveRDS(models[[target_col]],
+          paste0(OUTDIR, "rf_model_", target_col, ".rds"))
+}
+
+message("\n=============================")
+message(" Training + Validation DONE ")
+message("=============================")
