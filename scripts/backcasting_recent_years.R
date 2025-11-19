@@ -69,12 +69,15 @@ for (h in target_horizons) {
   target_col <- paste0("dist_t", h)
   message("\nTraining model for ", target_col)
   
-  # Ensure target is factor
-  TRAIN[[target_col]] <- factor(TRAIN[[target_col]], levels=c(0,1))
+  # Remove NA target rows
+  TRAIN_h <- TRAIN[!is.na(get(target_col))]
+  
+  # Convert to factor
+  TRAIN_h[[target_col]] <- factor(TRAIN_h[[target_col]], levels = c(0, 1))
   
   rf <- ranger(
     formula = as.formula(paste0(target_col, " ~ .")),
-    data = TRAIN[, c(target_col, band_cols), with = FALSE],
+    data = TRAIN_h[, c(target_col, band_cols), with = FALSE],
     num.trees = 500,
     mtry = 3,
     probability = TRUE,
