@@ -7,6 +7,7 @@ library(data.table)
 library(ranger)
 library(caret)
 library(pROC)
+library(terra)
 
 # ===============================================================
 # 1. Load long-format BAP dataset
@@ -160,6 +161,75 @@ print(perf_table)
 fwrite(perf_table,
        "/mnt/eo/EO4Backcasting/_models/backcast_performance_summary.csv")
 
+
+# ---------------------------------------------------------------
+# Load performance summary
+# ---------------------------------------------------------------
+perf <- fread("/mnt/eo/EO4Backcasting/_models/backcast_performance_summary.csv")
+
+# ---------------------------------------------------------------
+# Convert to long format for plotting
+# ---------------------------------------------------------------
+metrics <- c("accuracy", "sensitivity", "specificity", "precision", "f1", "AUC")
+
+perf_long <- melt(
+  perf,
+  id.vars   = "horizon",
+  measure.vars = metrics,
+  variable.name = "metric",
+  value.name = "value"
+)
+
+# Capitalize metric names for pretty plotting
+pretty_names <- c(
+  accuracy     = "Accuracy",
+  sensitivity  = "Sensitivity",
+  specificity  = "Specificity",
+  precision    = "Precision",
+  f1           = "F1-score",
+  AUC          = "AUC"
+)
+
+perf_long[, metric := factor(metric, levels = metrics, labels = pretty_names)]
+
+
+# ---------------------------------------------------------------
+# Plot: Multi-panel validation metrics
+# ---------------------------------------------------------------
+p <- ggplot(perf_long, aes(x = horizon, y = value)) +
+  geom_line(size = 1.2, color = "#1f77b4") +
+  geom_point(size = 2.5, color = "#1f77b4") +
+  scale_x_continuous(breaks = 1:5, labels = paste0("t-", 1:5)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+  facet_wrap(~ metric, ncol = 3, scales = "free_y") +
+  labs(
+    x = "Prediction Horizon",
+    y = "Metric Value",
+    title = "Backcasting Performance Across Horizons (t–1 … t–5)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    plot.title = element_text(face = "bold", size = 16, margin = margin(0,0,10,0)),
+    axis.title  = element_text(size = 12),
+    axis.text   = element_text(size = 10)
+  )
+
+print(p)
+
+# ---------------------------------------------------------------
+# Save the plot
+# ---------------------------------------------------------------
+ggsave(
+  "/mnt/eo/EO4Backcasting/_figs/backcast_validation_metrics.png",
+  p,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+
+
+
 # ===============================================================
 # 8. SAVE TRAINED MODELS
 # ===============================================================
@@ -177,3 +247,63 @@ for (h in target_horizons) {
 message("\n=============================")
 message(" Training + Validation DONE ")
 message("=============================")
+
+
+
+#-------------------------------------------------------------------------------
+### Model training
+
+# ----------------------------------------------------
+# Input paths
+# ----------------------------------------------------
+TILE <- "/mnt/dss_europe/level3_interpolated/X0016_Y0020/20100801_LEVEL3_LNDLG_IBAP.tif"
+MASK <- "/mnt/eo/EFDA_v211/forest_landuse_aligned.tif"
+
+OUT_TILE <- "/mnt/eo/EO4Backcasting/_tiles/X0016_Y0020_IBAP_forestonly.tif"
+dir.create(dirname(OUT_TILE), showWarnings = FALSE)
+
+# ----------------------------------------------------
+# 1. Load tile + forest mask
+# ----------------------------------------------------
+r_tile <- rast(TILE)
+r_mask <- rast(MASK)
+
+# ----------------------------------------------------
+# 2. Reproject/resample mask onto tile grid
+# ----------------------------------------------------
+# same CRS? If not, reproject
+if (!same.crs(r_tile, r_mask)) {
+  message("Reprojecting mask to tile CRS…")
+  r_mask <- project(r_mask, r_tile, method = "near")
+}
+
+# same resolution and extent? If not, resample
+if (!all(res(r_tile) == res(r_mask)) || !ext(r_tile) == ext(r_mask)) {
+  message("Resampling mask to tile grid…")
+  r_mask <- resample(r_mask, r_tile, method = "near")
+}
+
+# ----------------------------------------------------
+# 3. Ensure mask is binary 1 (forest) / NA (non-forest)
+# ----------------------------------------------------
+r_mask01 <- classify(
+  r_mask,
+  rbind(
+    c(-Inf, 0.5, NA),   # non-forest -> NA
+    c(0.5,  Inf, 1)     # forest -> 1
+  )
+)
+
+# ----------------------------------------------------
+# 4. Apply forest mask to tile
+# ----------------------------------------------------
+# Multiply keeps only forest pixels; non-forest → NA
+r_tile_forest <- r_tile * r_mask01
+
+
+#-------------------------------------------------------------------------------
+### Prediction
+
+
+
+
