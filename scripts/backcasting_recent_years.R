@@ -46,60 +46,71 @@ DT[, dist := as.integer(year == yod)]
 
 make_sequences <- function(df) {
   
-  out <- list()
   n <- nrow(df)
   
-  # For each possible end of window
+  # Too short → no sequences possible
+  if (n < max(input_lags) + max(target_lags) + 1) {
+    return(NULL)
+  }
+  
+  out <- list()
+  
   for (i in seq_len(n)) {
     
-    # Window end must be >= max(target_lags)+1
-    if (i <= max(target_lags)) next  
+    # Target years must exist
+    if (i <= max(target_lags)) next
     
-    # Compute input indices (t0..t5)
+    # Input window indices
     idx_in <- (i - max(input_lags)) : i
-    
-    # Skip if window exceeds bounds
     if (min(idx_in) < 1 || max(idx_in) > n) next
     
-    # Extract input rows
     chunk_in <- df[idx_in]
     
-    # Check window length
     if (nrow(chunk_in) != length(input_lags)) next
     
-    # Compute target indices (t-1..t-5)
+    # Target indices (t-1..t-5)
     idx_tar <- i - target_lags
-    
-    # Skip if target rows don't exist
     if (min(idx_tar) < 1) next
     
     chunk_tar <- df[idx_tar]
     
-    # --- Build feature vector ---
-    X <- as.list(as.vector(t(chunk_in[, ..bands])))
+    # --- Build input feature vector ---
+    Xvals <- as.vector(t(chunk_in[, ..bands]))
+    
+    # Safety check: skip if incomplete
+    if (length(Xvals) != length(bands) * length(input_lags)) next
+    
+    X <- as.list(Xvals)
     names(X) <- paste0(
       rep(bands, each = length(input_lags)),
       "_t", rep(input_lags, times = length(bands))
     )
     
-    # --- Build target vector ---
+    # --- Build target labels ---
     Y <- as.list(chunk_tar$dist)
     names(Y) <- paste0("dist_t", target_lags)
     
-    out[[length(out)+1]] <- c(
+    out[[length(out) + 1]] <- c(
       list(ID = df$ID[1], ref_year = df$year[i]),
       X, Y
     )
   }
   
+  # If no valid sequences → return NULL
   if (length(out) == 0) return(NULL)
+  
+  # Filter out empty or NULL entries
+  out <- out[sapply(out, function(x) !is.null(x) && length(x) > 0)]
+  
+  # Still empty?
+  if (length(out) == 0) return(NULL)
+  
+  # Now all entries are valid rows
   rbindlist(out, fill = TRUE)
 }
 
-
 # Apply function to each pixel
 SEQ <- DT[, make_sequences(.SD), by = ID]
-
 
 # ===============================================================
 # 5. TRAIN RANDOM FOREST MODELS for each target (t-1...t-5)
