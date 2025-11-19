@@ -300,10 +300,84 @@ r_mask01 <- classify(
 # Multiply keeps only forest pixels; non-forest → NA
 r_tile_forest <- r_tile * r_mask01
 
+# ----------------------------------------------------
+# 5. Save masked tile
+# ----------------------------------------------------
+writeRaster(
+  r_tile_forest,
+  OUT_TILE,
+  overwrite = TRUE,
+  wopt = list(
+    datatype = "INT2S",
+    gdal = c("COMPRESS=ZSTD", "PREDICTOR=2", "ZSTD_LEVEL=8")
+  )
+)
 
 #-------------------------------------------------------------------------------
 ### Prediction
 
 
+# -----------------------------------------------------
+# PATHS
+# -----------------------------------------------------
+TILE <- "/mnt/eo/EO4Backcasting/_tiles/X0016_Y0020_IBAP_forestonly.tif"
+MODEL_DIR <- "/mnt/eo/EO4Backcasting/_models"
+OUT_DIR   <- "/mnt/eo/EO4Backcasting/_predictions_tiles"
+dir.create(OUT_DIR, showWarnings = FALSE)
 
+band_cols <- c("blue","green","red","nir","swir1","swir2")
+horizons  <- 1:5
 
+# -----------------------------------------------------
+# LOAD MODELS
+# -----------------------------------------------------
+models <- list()
+for (h in horizons) {
+  models[[h]] <- readRDS(file.path(
+    MODEL_DIR,
+    paste0("rf_model_dist_t", h, ".rds")
+  ))
+}
+
+# -----------------------------------------------------
+# PREDICT FUNCTION (the ONLY one!)
+# -----------------------------------------------------
+predict_fun <- function(d, model) {
+  df <- as.data.frame(d)
+  p <- predict(model, df)$predictions[, "1"]
+  return(p)
+}
+
+# -----------------------------------------------------
+# PREDICTION
+# -----------------------------------------------------
+r <- rast(TILE)
+names(r) <- band_cols
+
+out_list <- list()
+
+for (h in horizons) {
+  
+  message("Predicting horizon t-", h)
+  
+  out <- terra::predict(
+    r,
+    fun = function(d) predict_fun(d, models[[h]]),
+    filename = file.path(OUT_DIR, paste0("X0016_Y0020_p_t", h, ".tif")),
+    overwrite = TRUE,
+    wopt = list(datatype="FLT4S")
+  )
+  
+  names(out) <- paste0("p_dist_t", h)
+  out_list[[h]] <- out
+}
+
+# stack
+stack_out <- rast(out_list)
+writeRaster(
+  stack_out,
+  file.path(OUT_DIR, "X0016_Y0020_prediction_stack.tif"),
+  overwrite = TRUE
+)
+
+message("DONE.")
