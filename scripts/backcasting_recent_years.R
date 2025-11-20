@@ -319,113 +319,69 @@ library(terra)
 library(ranger)
 library(data.table)
 
-ls()
-
-
-# ============================================================
-# 0. PATHS & PARAMETERS
-# ============================================================
-
 TILE <- "/mnt/dss_europe/level3_interpolated/X0016_Y0020/20100801_LEVEL3_LNDLG_IBAP.tif"
-
 FOREST_MASK <- "/mnt/eo/EFDA_v211/forest_landuse_aligned.tif"
-
 MODEL_DIR <- "/mnt/eo/EO4Backcasting/_models/"
 OUT_DIR   <- "/mnt/eo/EO4Backcasting/_predictions/"
-
 dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
 
-band_cols <- c("blue", "green", "red", "nir", "swir1", "swir2")
-horizons  <- 1:5   # t1..t5
+band_cols <- c("blue","green","red","nir","swir1","swir2")
+horizons <- 1:5
 
-
-# ============================================================
-# 1. LOAD MODELS
-# ============================================================
-
+# -------------------------
+# Load models
+# -------------------------
 models <- list()
 for (h in horizons) {
   target <- paste0("dist_t", h)
-  models[[ target ]] <- readRDS(file.path(MODEL_DIR, paste0("model_", target, ".rds")))
+  models[[target]] <- readRDS(file.path(MODEL_DIR, paste0("rf_model_", target, ".rds")))
 }
 
-
-# ============================================================
-# 2. LOAD TILE
-# ============================================================
-
-message("\nLoading tile:")
+# -------------------------
+# Load tile + mask
+# -------------------------
 r_tile <- rast(TILE)
-print(r_tile)
-
-if (nlyr(r_tile) != 6) {
-  stop("Tile does not have 6 bands. Layers: ", nlyr(r_tile))
-}
-
 names(r_tile) <- band_cols
 
-
-# ============================================================
-# 3. LOAD FOREST MASK AND ALIGN
-# ============================================================
-
-message("\nLoading forest mask:")
 r_mask <- rast(FOREST_MASK)
 
-# project mask to tile CRS if needed
-if (!same.crs(r_tile, r_mask)) {
-  message("Reprojecting forest mask...")
-  r_mask <- project(r_mask, r_tile, method = "near")
-}
+if (!same.crs(r_tile, r_mask))
+  r_mask <- project(r_mask, r_tile, method="near")
 
-# align grid
-if (!ext(r_mask) == ext(r_tile) || !all(res(r_mask) == res(r_tile))) {
-  message("Resampling forest mask...")
-  r_mask <- resample(r_mask, r_tile, method = "near")
-}
+if (!ext(r_mask)==ext(r_tile) || !all(res(r_mask)==res(r_tile)))
+  r_mask <- resample(r_mask, r_tile, method="near")
 
-# mask forest = 1, others = NA
-message("Applying mask...")
 r_mask01 <- classify(r_mask, rbind(c(-Inf,0.5,NA), c(0.5,Inf,1)))
 r_tile_forest <- mask(r_tile, r_mask01)
 
-
-# ============================================================
-# 4. DEFINE terra::predict WRAPPERS
-# ============================================================
-
+# -------------------------
+# Prediction wrapper
+# -------------------------
 make_fun <- function(rf_model) {
   force(rf_model)
-  function(v, ...) {              # terra passes (values, ...)
-    df <- as.data.frame(v)
-    preds <- predict(rf_model, df)$predictions[, "1"]
-    return(preds)
+  function(model, data, ...) {
+    df <- as.data.frame(data)
+    predict(rf_model, df)$predictions[, "1"]
   }
 }
 
-
-# ============================================================
-# 5. RUN PREDICTION
-# ============================================================
-
-out_list <- list()
-
+# -------------------------
+# Run predictions
+# -------------------------
 for (h in horizons) {
   
   target <- paste0("dist_t", h)
-  message("Predicting horizon ", target)
+  message("Predicting ", target)
   
   rf_model <- models[[target]]
-  fun_h <- make_fun(rf_model)    # this embeds the ranger model
+  fun_h <- make_fun(rf_model)
   
-  outfile <- file.path(
-    OUT_DIR,
-    paste0("X0016_Y0020_p_", target, ".tif")
-  )
+  outfile <- file.path(OUT_DIR, paste0("X0016_Y0020_p_", target, ".tif"))
   
   out_r <- terra::predict(
     r_tile_forest,
-    model = fun_h,         # <--- IMPORTANT
+    model = 1,       # <-- REQUIRED
+    fun   = fun_h,   # <-- MUST accept (model, data, ...)
     filename = outfile,
     overwrite = TRUE,
     wopt = list(
@@ -435,26 +391,5 @@ for (h in horizons) {
   )
   
   names(out_r) <- paste0("p_", target)
-  out_list[[h]] <- out_r
-  
   message("Saved: ", outfile)
 }
-
-
-# ============================================================
-# 6. STACK ALL PREDICTION LAYERS
-# ============================================================
-
-stack_out <- rast(out_list)
-
-stack_file <- file.path(
-  OUT_DIR,
-  "X0016_Y0020_prediction_stack.tif"
-)
-
-writeRaster(stack_out, stack_file, overwrite = TRUE)
-
-message("\n====================================================")
-message("FINAL STACK SAVED: ", stack_file)
-message("====================================================")
-
