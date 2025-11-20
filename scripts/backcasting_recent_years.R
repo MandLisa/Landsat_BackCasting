@@ -393,3 +393,38 @@ for (h in horizons) {
   names(out_r) <- paste0("p_", target)
   message("Saved: ", outfile)
 }
+
+### set weird NAs to 0 for all probability rasters
+p1 <- rast("/mnt/eo/EO4Backcasting/_predictions/X0016_Y0020_p_dist_t1.tif")
+p2 <- rast("/mnt/eo/EO4Backcasting/_predictions/X0016_Y0020_p_dist_t2.tif")
+p3 <- rast("/mnt/eo/EO4Backcasting/_predictions/X0016_Y0020_p_dist_t3.tif")
+p4 <- rast("/mnt/eo/EO4Backcasting/_predictions/X0016_Y0020_p_dist_t4.tif")
+p5 <- rast("/mnt/eo/EO4Backcasting/_predictions/X0016_Y0020_p_dist_t5.tif")
+
+# function
+replace_value <- function(r, bad_value, outfile) {
+  r2 <- subst(r, from = bad_value, to = 0)
+  writeRaster(r2, outfile, overwrite = TRUE)
+  return(r2)
+}
+
+
+p1_fixed <- replace_value(p1, val1, "p1_fixed.tif")
+p2_fixed <- replace_value(p2, val2, "p2_fixed.tif")
+p3_fixed <- replace_value(p3, val3, "p3_fixed.tif")
+p4_fixed <- replace_value(p4, val4, "p4_fixed.tif")
+p5_fixed <- replace_value(p5, val5, "p5_fixed.tif")
+
+
+
+
+
+writeRaster(p1_fixed, "/mnt/eo/EO4Backcasting/_predictions/p_dist_2009_fixed.tif", overwrite = TRUE)
+writeRaster(p2_fixed, "/mnt/eo/EO4Backcasting/_predictions/p_dist_2008_fixed.tif", overwrite = TRUE)
+writeRaster(p3_fixed, "/mnt/eo/EO4Backcasting/_predictions/p_dist_2007_fixed.tif", overwrite = TRUE)
+writeRaster(p4_fixed, "/mnt/eo/EO4Backcasting/_predictions/p_dist_2006_fixed.tif", overwrite = TRUE)
+writeRaster(p5_fixed, "/mnt/eo/EO4Backcasting/_predictions/p_dist_2005_fixed.tif", overwrite = TRUE)
+
+
+
+
