@@ -3,193 +3,129 @@
 # ============================================================
 suppressPackageStartupMessages({
   library(data.table)
-  library(terra)
   library(ranger)
 })
 
 # ============================================================
-# 1. READ TRAINING DATA AND BUILD 5-YEAR YSD CLASSES
+# 1. READ TRAINING DATA
 # ============================================================
 
-# training data with one record per pixel × year
-# (columns like in your screenshot: blue, green, red, nir, swir1, swir2, NBR, ysd, state, ...)
 train_csv <- "/mnt/eo/EO4Backcasting/_intermediates/training_healthy_disturbed_2711_final.csv"
 dt <- fread(train_csv)
 
-# according to your description:
-# - disturbed pixels only
-# - ysd_bin has levels: ysd1_5, ysd6_10, ysd11_15, ysd16_20, ysd20
-bin_levels <- c("ysd1_5", "ysd6_10", "ysd11_15", "ysd16_20", "ysd20")
+# sanity check: required columns
+req_cols <- c("ID", "ysd", "state",
+              "blue", "green", "red", "nir", "swir1", "swir2", "NBR")
+stopifnot(all(req_cols %in% names(dt)))
 
-dt <- dt[state == "disturbed" & ysd_bin %in% bin_levels]
-dt[, ysd_bin := factor(ysd_bin, levels = bin_levels)]
+# ============================================================
+# 2. DEFINE NEW 3-CLASS ysd BINS (EARLY / INTERMEDIATE / LATE)
+#    early:        ysd 1–5
+#    intermediate: ysd 6–10
+#    late:         ysd >10
+# ============================================================
 
-# ensure required columns exist
-stopifnot(all(c("ID", "year", "NBR") %in% names(dt)))
+# keep only disturbed pixels
+dt <- dt[state == "disturbed"]
 
-# sort by ID and year
-setorder(dt, ID, year)
+# create new bin variable
+dt[, ysd_bin3 := NA_character_]
 
-# base spectral predictors (adapt if needed)
+dt[ysd >=  1 & ysd <=  5, ysd_bin3 := "ysd1_5"]
+dt[ysd >=  6 & ysd <= 10, ysd_bin3 := "ysd6_10"]
+dt[ysd >  10,              ysd_bin3 := "ysd>10"]
+
+# drop rows without a defined bin (ysd <= 0, missing, etc.)
+dt <- dt[!is.na(ysd_bin3)]
+
+# make it an ordered factor
+dt[, ysd_bin3 := factor(ysd_bin3,
+                        levels = c("ysd1_5", "ysd6_10", "ysd>10"))]
+
+# quick check of class distribution
+print(dt[, .N, by = ysd_bin3])
+
+# ============================================================
+# 3. BUILD BASELINE DATASET (NO TREND FEATURES)
+# ============================================================
+
 base_pred <- c("blue", "green", "red", "nir", "swir1", "swir2", "NBR")
 
-# ============================================================
-# 2. COMPUTE NBR_trend3 (LOCAL 3-YEAR SLOPE: year-1, year, year+1)
-# ============================================================
+# restrict to rows with complete predictors
+dt_base <- dt[complete.cases(dt[, ..base_pred])]
 
-dt[, NBR_trend3 := {
-  y <- NBR
-  x <- year
-  n <- .N
-  out <- rep(NA_real_, n)
-  if (n >= 2) {
-    for (i in seq_len(n)) {
-      idx <- which(abs(x - x[i]) <= 1 & !is.na(y))  # window: year-1..year+1
-      if (length(idx) >= 2) {
-        out[i] <- coef(lm(y[idx] ~ x[idx]))[2]      # slope
-      }
-    }
-  }
-  out
-}, by = ID]
+# sort by ID for reproducibility
+setorder(dt_base, ID)
 
 # ============================================================
-# 3. COMPUTE NBR_trend10 (FORWARD 10-YEAR SLOPE: year..year+9)
-# ============================================================
-
-dt[, NBR_trend10 := {
-  y <- NBR
-  x <- year
-  n <- .N
-  out <- rep(NA_real_, n)
-  if (n >= 2) {
-    for (i in seq_len(n)) {
-      idx <- which(x >= x[i] & x <= x[i] + 9 & !is.na(y))  # window: year..year+9
-      if (length(idx) >= 2) {
-        out[i] <- coef(lm(y[idx] ~ x[idx]))[2]            # slope
-      }
-    }
-  }
-  out
-}, by = ID]
-
-# ============================================================
-# 4. BUILD TWO MODEL DATASETS (3-year vs 10-year)
-# ============================================================
-
-pred3  <- c(base_pred, "NBR_trend3")
-pred10 <- c(base_pred, "NBR_trend10")
-
-dt_mod3  <- dt[complete.cases(dt[, ..pred3])]
-dt_mod10 <- dt[complete.cases(dt[, ..pred10])]
-
-# For a fair comparison, restrict to IDs that have *both* trends available
-ids_common <- intersect(unique(dt_mod3$ID), unique(dt_mod10$ID))
-
-dt_mod3  <- dt_mod3[ID %in% ids_common]
-dt_mod10 <- dt_mod10[ID %in% ids_common]
-
-# sanity checks
-cat("Number of pixels (IDs) used in both models:", length(ids_common), "\n")
-cat("Number of samples (rows) in model3 dataset:", nrow(dt_mod3), "\n")
-cat("Number of samples (rows) in model10 dataset:", nrow(dt_mod10), "\n")
-
-# ============================================================
-# 5. TRAIN–TEST SPLIT BY ID (SAME SPLIT FOR BOTH MODELS)
+# 4. TRAIN/TEST SPLIT BY PIXEL ID
+#    (so the same pixel never appears in both train and test)
 # ============================================================
 
 set.seed(42)
 
-ids <- ids_common
-n_ids <- length(ids)
-train_ids <- sample(ids, size = floor(0.7 * n_ids))
-test_ids  <- setdiff(ids, train_ids)
+ids_all <- unique(dt_base$ID)
+n_ids   <- length(ids_all)
 
-train3 <- dt_mod3[ID %in% train_ids]
-test3  <- dt_mod3[ID %in% test_ids]
+train_ids <- sample(ids_all, size = floor(0.7 * n_ids))
+test_ids  <- setdiff(ids_all, train_ids)
 
-train10 <- dt_mod10[ID %in% train_ids]
-test10  <- dt_mod10[ID %in% test_ids]
+train_base <- dt_base[ID %in% train_ids]
+test_base  <- dt_base[ID %in% test_ids]
 
-cat("Train IDs:", length(train_ids), " Test IDs:", length(test_ids), "\n")
+cat("Number of IDs – train:", length(train_ids),
+    " test:", length(test_ids), "\n")
+cat("Number of samples – train:", nrow(train_base),
+    " test:", nrow(test_base), "\n")
 
 # ============================================================
-# 6. TRAIN RANDOM FOREST MODELS
-#    Model A: base predictors + NBR_trend3
-#    Model B: base predictors + NBR_trend10
+# 5. TRAIN BASELINE RANDOM FOREST (NO TREND)
 # ============================================================
 
-# --- Model with 3-year trend ---
-rf3_formula <- as.formula(
-  paste("ysd_bin ~", paste(pred3, collapse = " + "))
+rf_base_formula <- as.formula(
+  paste("ysd_bin3 ~", paste(base_pred, collapse = " + "))
 )
 
-rf3 <- ranger(
-  formula        = rf3_formula,
-  data           = train3[, c(pred3, "ysd_bin"), with = FALSE],
+rf_base <- ranger(
+  formula        = rf_base_formula,
+  data           = train_base[, c(base_pred, "ysd_bin3"), with = FALSE],
   num.trees      = 500,
-  mtry           = 3,            # tune if desired
+  mtry           = 3,         # can tune; start with something moderate
   importance     = "impurity",
   probability    = FALSE,
   classification = TRUE
 )
 
-# --- Model with 10-year trend ---
-rf10_formula <- as.formula(
-  paste("ysd_bin ~", paste(pred10, collapse = " + "))
-)
-
-rf10 <- ranger(
-  formula        = rf10_formula,
-  data           = train10[, c(pred10, "ysd_bin"), with = FALSE],
-  num.trees      = 500,
-  mtry           = 3,
-  importance     = "impurity",
-  probability    = FALSE,
-  classification = TRUE
-)
+print(rf_base)
 
 # ============================================================
-# 7. PREDICT ON TEST SETS AND COMPARE PERFORMANCE
+# 6. EVALUATE ON TEST SET
 # ============================================================
 
-# --- predictions ---
-pred3_test  <- predict(rf3,  data = test3[,  ..pred3])$predictions
-pred10_test <- predict(rf10, data = test10[, ..pred10])$predictions
+# predictions
+pred_base_test <- predict(rf_base,
+                          data = test_base[, ..base_pred])$predictions
 
-# --- confusion matrices ---
-cm3  <- table(truth = test3$ysd_bin,  pred = pred3_test)
-cm10 <- table(truth = test10$ysd_bin, pred = pred10_test)
+# confusion matrix
+cm_base <- table(truth = test_base$ysd_bin3,
+                 pred  = pred_base_test)
 
-cat("\nConfusion matrix – Model with 3-year trend:\n")
-print(cm3)
+cat("\nConfusion matrix – baseline model (no trend):\n")
+print(cm_base)
 
-cat("\nConfusion matrix – Model with 10-year trend:\n")
-print(cm10)
+# overall accuracy
+acc_base <- mean(pred_base_test == test_base$ysd_bin3)
+cat("\nOverall accuracy – baseline model: ",
+    round(acc_base, 3), "\n")
 
-# --- overall accuracy ---
-acc3  <- mean(pred3_test  == test3$ysd_bin)
-acc10 <- mean(pred10_test == test10$ysd_bin)
-
-cat("\nOverall accuracy – 3-year trend model:  ", round(acc3, 3), "\n")
-cat("Overall accuracy – 10-year trend model: ", round(acc10, 3), "\n")
-
-# --- per-class accuracy (user's accuracy) ---
-class_acc3  <- diag(prop.table(cm3,  1))  # row-wise proportions
-class_acc10 <- diag(prop.table(cm10, 1))
-
-cat("\nPer-class accuracy – 3-year trend model:\n")
-print(round(class_acc3, 3))
-
-cat("\nPer-class accuracy – 10-year trend model:\n")
-print(round(class_acc10, 3))
+# per-class (row-wise) accuracy
+class_acc_base <- diag(prop.table(cm_base, 1))
+cat("\nPer-class accuracy – baseline model:\n")
+print(round(class_acc_base, 3))
 
 # ============================================================
-# 8. OPTIONAL: VARIABLE IMPORTANCE
+# 7. OPTIONAL: VARIABLE IMPORTANCE
 # ============================================================
 
-cat("\nVariable importance – 3-year trend model:\n")
-print(sort(rf3$variable.importance, decreasing = TRUE))
-
-cat("\nVariable importance – 10-year trend model:\n")
-print(sort(rf10$variable.importance, decreasing = TRUE))
+cat("\nVariable importance – baseline model:\n")
+print(sort(rf_base$variable.importance, decreasing = TRUE))
