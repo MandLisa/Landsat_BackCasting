@@ -402,18 +402,18 @@ p4 <- rast("/mnt/eo/EO4Backcasting/_predictions/X0016_Y0020_p_dist_t4.tif")
 p5 <- rast("/mnt/eo/EO4Backcasting/_predictions/X0016_Y0020_p_dist_t5.tif")
 
 # function
-replace_value <- function(r, bad_value, outfile) {
-  r2 <- subst(r, from = bad_value, to = 0)
+replace_to_na <- function(r, bad_value, outfile) {
+  r2 <- subst(r, from = bad_value, to = NA)
   writeRaster(r2, outfile, overwrite = TRUE)
   return(r2)
 }
 
 
-p1_fixed <- replace_value(p1, val1, "p1_fixed.tif")
-p2_fixed <- replace_value(p2, val2, "p2_fixed.tif")
-p3_fixed <- replace_value(p3, val3, "p3_fixed.tif")
-p4_fixed <- replace_value(p4, val4, "p4_fixed.tif")
-p5_fixed <- replace_value(p5, val5, "p5_fixed.tif")
+p1_fixed <- replace_to_na(p1, 0.181702, "p1_fixed.tif")
+p2_fixed <- replace_to_na(p2, 0.123847, "p2_fixed.tif")
+p3_fixed <- replace_to_na(p3, 0.0621494, "p3_fixed.tif")
+p4_fixed <- replace_to_na(p4, 0.0630238, "p4_fixed.tif")
+p5_fixed <- replace_to_na(p5, 0, "p5_fixed.tif")
 
 
 
@@ -426,5 +426,82 @@ writeRaster(p4_fixed, "/mnt/eo/EO4Backcasting/_predictions/p_dist_2006_fixed.tif
 writeRaster(p5_fixed, "/mnt/eo/EO4Backcasting/_predictions/p_dist_2005_fixed.tif", overwrite = TRUE)
 
 
+# -----------------------------------------------
+# 1. Load cleaned probability rasters (p1–p5)
+# (Replace with your actual file paths)
+# -----------------------------------------------
+p1 <- rast("/mnt/eo/EO4Backcasting/_predictions/p_dist_2009_fixed.tif")  # t-1 → 2009
+p2 <- rast("/mnt/eo/EO4Backcasting/_predictions/p_dist_2008_fixed.tif")  # t-2 → 2008
+p3 <- rast("/mnt/eo/EO4Backcasting/_predictions/p_dist_2007_fixed.tif")  # t-3 → 2007
+p4 <- rast("/mnt/eo/EO4Backcasting/_predictions/p_dist_2006_fixed.tif")  # t-4 → 2006
+p5 <- rast("/mnt/eo/EO4Backcasting/_predictions/p_dist_2005_fixed.tif")  # t-5 → 2005
+
+# Check that all rasters align
+stopifnot(compareGeom(c(p1,p2,p3,p4,p5), stopOnError = TRUE))
+
+# -----------------------------------------------
+# 2. Threshold (choose based on validation)
+# -----------------------------------------------
+threshold <- 0.75
+
+b1 <- p1 > threshold
+b2 <- p2 > threshold
+b3 <- p3 > threshold
+b4 <- p4 > threshold
+b5 <- p5 > threshold
+
+
+# -----------------------------------------------
+# 3. Convert binary → year-coded rasters
+# -----------------------------------------------
+y1 <- b1 * 2009
+y2 <- b2 * 2008
+y3 <- b3 * 2007
+y4 <- b4 * 2006
+y5 <- b5 * 2005
+
+
+# Naming (optional but useful for debugging)
+names(y1) <- "dist_2009"
+names(y2) <- "dist_2008"
+names(y3) <- "dist_2007"
+names(y4) <- "dist_2006"
+names(y5) <- "dist_2005"
+
+
+# -----------------------------------------------
+# 4. Combine to a single disturbance-year raster
+# Priority rule:
+#   t-1 > t-2 > t-3 > t-4 > t-5
+# -----------------------------------------------
+
+dist_year <- app(c(y1, y2, y3, y4, y5), fun = function(x) {
+  # x = vector of values (one for each layer)
+  out <- x[1]                   # first: 2009
+  if (out == 0) out <- x[2]     # then 2008
+  if (out == 0) out <- x[3]     # then 2007
+  if (out == 0) out <- x[4]     # then 2006
+  if (out == 0) out <- x[5]     # then 2005
+  return(out)
+})
+
+names(dist_year) <- "disturbance_year"
+
+# -----------------------------------------------
+# 5. Write final disturbance-year map
+# -----------------------------------------------
+outfile <- "disturbance_year_2005_2009.tif"
+
+writeRaster(
+  dist_year,
+  outfile,
+  overwrite = TRUE,
+  wopt = list(
+    datatype = "INT2S",
+    gdal = c("COMPRESS=ZSTD", "PREDICTOR=2", "ZSTD_LEVEL=8")
+  )
+)
+
+message("Final disturbance-year raster saved as: ", outfile)
 
 
