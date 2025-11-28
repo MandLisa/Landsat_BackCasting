@@ -129,3 +129,107 @@ print(round(class_acc_base, 3))
 
 cat("\nVariable importance – baseline model:\n")
 print(sort(rf_base$variable.importance, decreasing = TRUE))
+
+
+
+
+# ============================================================
+# 1. CLASS FREQUENCIES
+# ============================================================
+
+freq <- dt_base[, .N, by = ysd_bin3][order(ysd_bin3)]
+freq
+# this tells you how imbalanced early / intermediate / late (ysd>10) are
+
+# ============================================================
+# 2. CLASS-WEIGHTED BASELINE MODEL (NO TREND)
+#    weights ∝ 1 / frequency
+# ============================================================
+
+# build weights inversely proportional to class size
+w_vec <- freq$N
+names(w_vec) <- as.character(freq$ysd_bin3)
+
+class_weights <- max(w_vec) / w_vec
+class_weights
+# larger weight for rarer classes
+
+library(ranger)
+
+rf_base_w <- ranger(
+  formula        = rf_base_formula,                        # ysd_bin3 ~ predictors
+  data           = train_base[, c(base_pred, "ysd_bin3"), with = FALSE],
+  num.trees      = 500,
+  mtry           = 3,
+  importance     = "impurity",
+  probability    = FALSE,
+  classification = TRUE,
+  class.weights  = class_weights
+)
+
+# ============================================================
+# 3. EVALUATION OF WEIGHTED MODEL
+# ============================================================
+
+pred_w_test <- predict(rf_base_w,
+                       data = test_base[, ..base_pred])$predictions
+
+cm_w <- table(truth = test_base$ysd_bin3,
+              pred  = pred_w_test)
+
+cat("\nConfusion matrix – weighted baseline model:\n")
+print(cm_w)
+
+acc_w <- mean(pred_w_test == test_base$ysd_bin3)
+cat("\nOverall accuracy – weighted baseline model: ",
+    round(acc_w, 3), "\n")
+
+class_acc_w <- diag(prop.table(cm_w, 1))
+cat("\nPer-class accuracy – weighted baseline model:\n")
+print(round(class_acc_w, 3))
+
+cat("\nVariable importance – weighted baseline model:\n")
+print(sort(rf_base_w$variable.importance, decreasing = TRUE))
+
+# ============================================================
+# 4. OPTIONAL: SIMPLE BALANCED SUBSAMPLE FOR TRAINING
+#    (downsample majority classes)
+# ============================================================
+
+set.seed(1)
+
+# balanced training set: same number of samples per class
+min_n <- min(freq$N)
+train_bal <- train_base[, .SD[sample(.N, min(.N, min_n))], by = ysd_bin3]
+
+train_bal[, .N, by = ysd_bin3]  # check balance
+
+rf_base_bal <- ranger(
+  formula        = rf_base_formula,
+  data           = train_bal[, c(base_pred, "ysd_bin3"), with = FALSE],
+  num.trees      = 500,
+  mtry           = 3,
+  importance     = "impurity",
+  probability    = FALSE,
+  classification = TRUE
+)
+
+pred_bal_test <- predict(rf_base_bal,
+                         data = test_base[, ..base_pred])$predictions
+
+cm_bal <- table(truth = test_base$ysd_bin3,
+                pred  = pred_bal_test)
+
+cat("\nConfusion matrix – balanced-subsample baseline model:\n")
+print(cm_bal)
+
+acc_bal <- mean(pred_bal_test == test_base$ysd_bin3)
+cat("\nOverall accuracy – balanced-subsample baseline model: ",
+    round(acc_bal, 3), "\n")
+
+class_acc_bal <- diag(prop.table(cm_bal, 1))
+cat("\nPer-class accuracy – balanced-subsample baseline model:\n")
+print(round(class_acc_bal, 3))
+
+
+
