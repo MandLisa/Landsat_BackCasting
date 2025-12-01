@@ -215,13 +215,15 @@ writeRaster(forest_eroded, forest_eroded_file, overwrite = TRUE)
 forest_eroded
 
 #--------------------
+bap_med_file <- "/mnt/eo/EO4Backcasting/_data/forest_mask_eroded_2px.tif"
 
 # align BAP composite to forest mask (if needed)
 # (assumes already same grid; if not, use project/align)
 bap_med <- rast(bap_med_file)
-bap_med <- crop(bap_med, forest)
-bap_med <- mask(bap_med, forest)
+bap_med <- crop(bap_med, forest_eroded)
+bap_med <- mask(bap_med, forest_eroded)
 
+plot(bap_med)
 # ensure band order/names match training predictors
 names(bap_med) <- base_pred
 print(bap_med)
