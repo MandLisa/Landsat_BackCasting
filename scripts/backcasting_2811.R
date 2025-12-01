@@ -81,12 +81,14 @@ rf_model <- ranger(
   data           = train_base[, c(base_pred, "ysd_bin3"), with = FALSE],
   num.trees      = 500,
   mtry           = 3,
+  min.node.size  = 5,           # or 10
   importance     = "impurity",
   probability    = FALSE,
   classification = TRUE,
   class.weights  = class_weights,
-  num.threads    = 20     
+  num.threads    = 30
 )
+
 
 
 print(rf_model)
@@ -103,7 +105,7 @@ print(diag(prop.table(cm_test, 1)))
 
 # ---------- 1.6 Save model ----------
 saveRDS(rf_model,
-        "/mnt/eo/EO4Backcasting/_intermediates/rf_ysd_bin3_spectral_only.rds")
+        "/mnt/eo/EO4Backcasting/_models/rf_3011.rds")
 
 ysd_levels <- levels(train_base$ysd_bin3)   # c("ysd1_5","ysd6_10","ysd>10")
 
@@ -111,63 +113,62 @@ ysd_levels <- levels(train_base$ysd_bin3)   # c("ysd1_5","ysd6_10","ysd>10")
 # ============================================================
 # 2. BUILD MEDIAN BAP COMPOSITE 1985–1987 (SPECTRAL BANDS ONLY)
 # ============================================================
+# directory with your LEVEL3 files
+in_dir <- "/mnt/dss_europe/level3_interpolated/X0016_Y0020"  
 
-# Paths and patterns to adapt!
-bap_dir   <- "/mnt/eo/eu_mosaics/BAP_comp"  # directory with yearly BAP rasters
-years_bap <- 1985:1987
-bap_files <- file.path(bap_dir,
-                       sprintf("BAP_%d.tif", years_bap))  # adapt to your names
+# all IBAP files from 1984–1986
+ibap_files <- list.files(
+  in_dir,
+  pattern = "^198[6-8].*IBAP\\.tif$",   # years 1984–1986, containing "IBAP.tif"
+  full.names = TRUE
+)
 
-if (!all(file.exists(bap_files))) {
-  stop("Some BAP files for 1985–1987 are missing. Check 'bap_files'.")
-}
+length(ibap_files)
+print(ibap_files)
 
-# read all BAP rasters (assumed: same extent, resolution, and band order)
-bap_stack <- rast(bap_files)   # this will have (nbands * 3) layers if multiband
+# ------------------------------------------------------------
+# 2. Read as one multi-layer SpatRaster
+#    (3 rasters × 6 bands = 18 layers)
+# ------------------------------------------------------------
+ibap_stack <- rast(ibap_files)
 
-# assume each BAP has the same 6 bands in order blue, green, red, nir, swir1, swir2
+n_files <- length(ibap_files)
 n_bands <- 6L
-if (nlyr(bap_stack) != n_bands * length(years_bap)) {
-  stop("Unexpected number of layers in BAP stack, check bands/year layout.")
-}
+stopifnot(nlyr(ibap_stack) == n_files * n_bands)
 
-# compute median over years per band
-bap_med <- rast()
-for (b in 1:n_bands) {
-  idx <- seq(b, nlyr(bap_stack), by = n_bands)  # band b across all years
-  band_med <- app(bap_stack[[idx]], fun = median, na.rm = TRUE)
-  names(band_med) <- names(bap_stack)[b]        # keep band name from first year
-  bap_med <- c(bap_med, band_med)
-}
+# keep original band names from the first BAP
+orig_names <- names(ibap_stack)[1:n_bands]
 
-# check band names
-print(bap_med)
+# ------------------------------------------------------------
+# 3. Median per band across the 3 BAPs
+# ------------------------------------------------------------
+# index: layers 1,7,13 → band 1; 2,8,14 → band 2; ...
+idx <- rep(1:n_bands, times = n_files)
 
-# optional: write median composite to disk
-bap_med_file <- "/mnt/eo/EO4Backcasting/_intermediates/BAP_median_1985_1987_spectral.tif"
-writeRaster(bap_med, filename = bap_med_file, overwrite = TRUE)
+ibap_med <- tapp(
+  ibap_stack,
+  index = idx,
+  fun   = median,
+  na.rm = TRUE
+)
+
+names(ibap_med) <- orig_names  # e.g. blue, green, red, nir, swir1, swir2
+
+# ------------------------------------------------------------
+# 4. Write 6-band median composite
+# ------------------------------------------------------------
+outdir <- "/mnt/eo/EO4Backcasting/_data"
+out_file <- file.path(outdir, "IBAP_median_1986_1988.tif")
+writeRaster(ibap_med, out_file, overwrite = TRUE)
 
 
 # ============================================================
 # 3. APPLY FOREST MASK (WITH 2-PIXEL BORDER REMOVED)
 # ============================================================
 
-# Forest mask: 1 = forest, NA = non-forest
-forest_mask_file <- "/mnt/eo/EO4Backcasting/_intermediates/forest_mask.tif"
-forest <- rast(forest_mask_file)
 
-# remove outer 2-pixel frame to avoid edge effects
-nr <- nrow(forest)
-nc <- ncol(forest)
 
-forest[1:2, ] <- NA
-forest[(nr-1):nr, ] <- NA
-forest[, 1:2] <- NA
-forest[, (nc-1):nc] <- NA
-
-# optionally save eroded forest mask
-forest_eroded_file <- "/mnt/eo/EO4Backcasting/_intermediates/forest_mask_eroded_2px.tif"
-writeRaster(forest, forest_eroded_file, overwrite = TRUE)
+#--------------------
 
 # align BAP composite to forest mask (if needed)
 # (assumes already same grid; if not, use project/align)
