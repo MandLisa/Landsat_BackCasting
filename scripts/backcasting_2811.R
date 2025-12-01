@@ -81,14 +81,13 @@ rf_model <- ranger(
   data           = train_base[, c(base_pred, "ysd_bin3"), with = FALSE],
   num.trees      = 500,
   mtry           = 3,
-  min.node.size  = 5,           # or 10
+  min.node.size  = 5,
   importance     = "impurity",
-  probability    = TRUE,
+  probability    = TRUE,   # <- important
   classification = TRUE,
   class.weights  = class_weights,
   num.threads    = 30
 )
-
 
 
 print(rf_model)
@@ -105,7 +104,7 @@ print(diag(prop.table(cm_test, 1)))
 
 # ---------- 1.6 Save model ----------
 saveRDS(rf_model,
-        "/mnt/eo/EO4Backcasting/_models/rf_3011.rds")
+        "/mnt/eo/EO4Backcasting/_models/rf_112.rds")
 
 ysd_levels <- levels(train_base$ysd_bin3)   # c("ysd1_5","ysd6_10","ysd>10")
 
@@ -246,24 +245,48 @@ writeRaster(bap_med, outdir, overwrite = TRUE)
 # load model (or reuse rf_model from above)
 rf_model <- readRDS("/mnt/eo/EO4Backcasting/_intermediates/rf_3011.rds")
 
+# load cropped bap
+bap_med <- rast("/mnt/eo/EO4Backcasting/_data/bap_med_crop.tif")
+
+
 # wrapper for terra::predict: returns integer codes 1..3 for factor levels
 rf_fun <- function(model, x, ...) {
-  x <- as.data.frame(x)
-  pred <- predict(model, data = x)$predictions  # factor
-  as.integer(pred)                              # 1..nclasses
+  x_df <- as.data.frame(x)
+  n    <- nrow(x_df)
+  
+  # output: [n rows, 2 cols] = class_idx, p_max
+  out  <- matrix(NA_real_, nrow = n, ncol = 2)
+  if (n == 0) return(out)
+  
+  # which rows have complete predictors?
+  idx <- stats::complete.cases(x_df)
+  if (any(idx)) {
+    p <- predict(model, data = x_df[idx, , drop = FALSE])$predictions  # matrix [sum(idx), 3]
+    
+    class_idx <- max.col(p)                   # 1..nclasses
+    p_max     <- apply(p, 1, max)
+    
+    out[idx, 1] <- class_idx
+    out[idx, 2] <- p_max
+  }
+  
+  out  # terra will turn this into 2 layers
 }
+
 
 # predict over BAP median composite (only forest pixels after masking)
 pred_ysd_file <- "/mnt/eo/EO4Backcasting/_predictions/pred_112.tif"
 
 
-pred_ysd <- predict(
-  bap_med,          # SpatRaster with bands = base_pred
-  rf_model,         # 2nd arg = ranger model
-  rf_fun,           # 3rd arg = function(model, x, ...)
+pred_brick <- predict(
+  bap_med,    # SpatRaster tile with bands = base_pred
+  rf_model,   # model (2nd argument)
+  rf_fun,     # function(model, x, ...) (3rd argument)
   filename = pred_ysd_file,
   overwrite = TRUE
 )
+
+names(pred_brick) <- c("ysd_class", "p_max")
 
 
 # add categorical levels (1: ysd1_5, 2: ysd6_10, 3: ysd>10)
