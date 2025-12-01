@@ -83,7 +83,7 @@ rf_model <- ranger(
   mtry           = 3,
   min.node.size  = 5,           # or 10
   importance     = "impurity",
-  probability    = FALSE,
+  probability    = TRUE,
   classification = TRUE,
   class.weights  = class_weights,
   num.threads    = 30
@@ -215,18 +215,28 @@ writeRaster(forest_eroded, forest_eroded_file, overwrite = TRUE)
 forest_eroded
 
 #--------------------
-bap_med_file <- "/mnt/eo/EO4Backcasting/_data/forest_mask_eroded_2px.tif"
+bap_med_file <- "/mnt/eo/EO4Backcasting/_data/IBAP_median_1986_1988.tif"
 
 # align BAP composite to forest mask (if needed)
 # (assumes already same grid; if not, use project/align)
 bap_med <- rast(bap_med_file)
-bap_med <- crop(bap_med, forest_eroded)
-bap_med <- mask(bap_med, forest_eroded)
+
+crs(bap_med)
+crs(forest_eroded)
+
+
+forest_Crop <- crop(forest_eroded, bap_med)
+bap_med <- crop(bap_med, forest_Crop)
+bap_med <- mask(bap_med, forest_Crop)
 
 plot(bap_med)
+
 # ensure band order/names match training predictors
 names(bap_med) <- base_pred
 print(bap_med)
+
+outdir <- "/mnt/eo/EO4Backcasting/_data/bap_med_crop.tif"
+writeRaster(bap_med, outdir, overwrite = TRUE)
 
 
 # ============================================================
@@ -234,25 +244,27 @@ print(bap_med)
 # ============================================================
 
 # load model (or reuse rf_model from above)
-rf_model <- readRDS("/mnt/eo/EO4Backcasting/_intermediates/rf_ysd_bin3_spectral_only.rds")
+rf_model <- readRDS("/mnt/eo/EO4Backcasting/_intermediates/rf_3011.rds")
 
-# function for terra::predict: returns integer codes 1..3 for factor levels
-rf_fun <- function(df, model) {
-  df <- as.data.frame(df)
-  pred <- predict(model, data = df)$predictions  # factor
-  as.integer(pred)                               # 1..length(levels)
+# wrapper for terra::predict: returns integer codes 1..3 for factor levels
+rf_fun <- function(model, x, ...) {
+  x <- as.data.frame(x)
+  pred <- predict(model, data = x)$predictions  # factor
+  as.integer(pred)                              # 1..nclasses
 }
 
 # predict over BAP median composite (only forest pixels after masking)
-pred_ysd_file <- "/mnt/eo/EO4Backcasting/_intermediates/ysd_bin3_pred_BAP_1985_1987.tif"
+pred_ysd_file <- "/mnt/eo/EO4Backcasting/_predictions/pred_112.tif"
+
 
 pred_ysd <- predict(
-  bap_med,
-  rf_fun,
-  model    = rf_model,
+  bap_med,          # SpatRaster with bands = base_pred
+  rf_model,         # 2nd arg = ranger model
+  rf_fun,           # 3rd arg = function(model, x, ...)
   filename = pred_ysd_file,
   overwrite = TRUE
 )
+
 
 # add categorical levels (1: ysd1_5, 2: ysd6_10, 3: ysd>10)
 ysd_levels <- c("ysd1_5", "ysd6_10", "ysd>10")
