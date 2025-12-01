@@ -166,7 +166,53 @@ writeRaster(ibap_med, out_file, overwrite = TRUE)
 # 3. APPLY FOREST MASK (WITH 2-PIXEL BORDER REMOVED)
 # ============================================================
 
+forest <- rast("/mnt/eo/EFDA_v211/forest_landuse_aligned.tif")
 
+# 2. Make it strictly binary 0/1 (no NA), so focal behaves well
+#    - forest == 1 -> 1
+#    - everything else -> 0
+# ensure: 1 = forest, NA = non-forest
+forest01 <- ifel(forest == 1, 1, NA)
+
+# optional: write to disk so the next steps run fully on-disk
+forest01_file <- "/mnt/eo/EO4Backcasting/_data/forest_mask_binary.tif"
+writeRaster(forest01, forest01_file, overwrite = TRUE)
+forest01 <- rast(forest01_file)
+
+# non-forest = 1, forest = NA
+nonforest <- ifel(is.na(forest01), 1, NA)
+
+nonforest_file <- "/mnt/eo/EO4Backcasting/_data/nonforest_mask.tif"
+writeRaster(nonforest, nonforest_file, overwrite = TRUE)
+nonforest <- rast(nonforest_file)
+
+# distance to nearest non-forest (i.e. distance to forest edge)
+dist_file <- "/mnt/eo/EO4Backcasting/_data/dist_to_nonforest.tif"
+
+dist_to_nf <- distance(
+  nonforest,
+  filename  = dist_file,
+  overwrite = TRUE
+)
+dist_to_nf
+
+
+
+# pixel size (assumes square pixels)
+cellsize <- res(forest01)[1]          # e.g. 30
+buffer_dist <- 2 * cellsize          # distance corresponding to 2 pixels
+
+# keep only forest pixels that are >= 2 pixels away from non-forest
+# step 1: build a mask of "keep" pixels
+keep <- ifel(dist_to_nf >= buffer_dist, 1, NA)
+
+# step 2: apply this mask to the original forest mask
+forest_eroded <- mask(forest01, keep)
+
+forest_eroded_file <- "/mnt/eo/EO4Backcasting/_data/forest_mask_eroded_2px.tif"
+writeRaster(forest_eroded, forest_eroded_file, overwrite = TRUE)
+
+forest_eroded
 
 #--------------------
 
