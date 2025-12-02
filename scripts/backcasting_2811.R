@@ -250,28 +250,35 @@ bap_med <- rast("/mnt/eo/EO4Backcasting/_data/bap_med_crop.tif")
 
 
 # wrapper for terra::predict: returns integer codes 1..3 for factor levels
-rf_fun <- function(model, x, ...) {
+rf_fun_probs <- function(model, x, ...) {
   x_df <- as.data.frame(x)
   n    <- nrow(x_df)
+  if (n == 0) return(matrix(NA_real_, nrow = 0, ncol = 3))
   
-  # output: [n rows, 2 cols] = class_idx, p_max
-  out  <- matrix(NA_real_, nrow = n, ncol = 2)
-  if (n == 0) return(out)
+  out <- matrix(NA_real_, nrow = n, ncol = 3)
   
-  # which rows have complete predictors?
   idx <- stats::complete.cases(x_df)
   if (any(idx)) {
-    p <- predict(model, data = x_df[idx, , drop = FALSE])$predictions  # matrix [sum(idx), 3]
-    
-    class_idx <- max.col(p)                   # 1..nclasses
-    p_max     <- apply(p, 1, max)
-    
-    out[idx, 1] <- class_idx
-    out[idx, 2] <- p_max
+    p <- predict(model, data = x_df[idx, , drop = FALSE])$predictions  # [sum(idx), 3]
+    out[idx, ] <- as.matrix(p)
   }
   
-  out  # terra will turn this into 2 layers
+  out  # terra will make 3 layers
 }
+
+prob_file <- "/mnt/eo/EO4Backcasting/_predictions/prob_classes_tile.tif"
+
+prob_ras <- predict(
+  bap_med,
+  rf_model,
+  rf_fun_probs,
+  filename = prob_file,
+  overwrite = TRUE
+)
+
+names(prob_ras) <- c("prob_ysd1_5", "prob_ysd6_10", "prob_ysd_gt10")
+
+
 
 
 # predict over BAP median composite (only forest pixels after masking)
@@ -289,16 +296,18 @@ pred_brick <- predict(
 names(pred_brick) <- c("ysd_class", "p_max")
 
 
-# add categorical levels (1: ysd1_5, 2: ysd6_10, 3: ysd>10)
 ysd_levels <- c("ysd1_5", "ysd6_10", "ysd>10")
+ysd_class  <- pred_brick[[1]]
+lev_df     <- data.frame(ID = 1:3, ysd_bin = ysd_levels)
+levels(ysd_class) <- lev_df
 
-lev_df <- data.frame(
-  ID      = 1:length(ysd_levels),
-  ysd_bin = ysd_levels
-)
-levels(pred_ysd) <- lev_df
+writeRaster(ysd_class,
+            "/mnt/eo/EO4Backcasting/_predictions/ysd_tile.tif",
+            overwrite = TRUE)
+writeRaster(pred_brick[[2]],
+            "/mnt/eo/EO4Backcasting/_predictions/prob_tile.tif",
+            overwrite = TRUE)
 
-print(pred_ysd)
 
 
 # ============================================================
