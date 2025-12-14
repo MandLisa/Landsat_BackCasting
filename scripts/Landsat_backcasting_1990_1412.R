@@ -184,10 +184,40 @@ names(bap_1990) <- c(
   "swir2"
 )
 
+# ---- 6.2 Load forest mask (1 = forest, NA/0 = non-forest) ----
+forest_mask <- rast(
+  "/mnt/eo/EO4Backcasting/_data/forest_mask_eroded_2px.tif"
+)
+
+forest_mask_crop <- crop(
+  forest_mask,
+  ext(bap_1990)
+)
+
+# ---- 6.3 Ensure spatial alignment ----
+# (fail loudly if something is wrong)
+stopifnot(
+  compareGeom(bap_1990, forest_mask_crop, stopOnError = FALSE)
+)
+
+# ---- 6.4 Mask BAP to forest pixels only ----
+# keep pixels where forest_mask == 1
+bap_1990_forest <- mask(
+  bap_1990,
+  forest_mask_crop,
+  maskvalues = 0,
+  updatevalue = NA
+)
+
+# optional: free memory
+rm(bap_1990)
+gc()
+
+
 prob_file <- "/mnt/eo/EO4Backcasting/_predictions/ysd_probs_BAP1990.tif"
 
 prob_ras <- predict(
-  bap_1990,
+  bap_1990_forest,
   rf_model,
   rf_fun_probs,
   filename  = prob_file,
