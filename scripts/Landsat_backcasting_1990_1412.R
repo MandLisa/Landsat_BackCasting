@@ -204,9 +204,7 @@ stopifnot(
 # keep pixels where forest_mask == 1
 bap_1990_forest <- mask(
   bap_1990,
-  forest_mask_crop,
-  maskvalues = 0,
-  updatevalue = NA
+  forest_mask_crop
 )
 
 # optional: free memory
@@ -232,22 +230,3 @@ prob_ras
 # 7. DERIVED PRODUCTS
 # ======================================================================
 
-# ---- 7.1 Maximum class probability (confidence) ----
-p_max <- app(prob_ras, fun = max, na.rm = TRUE)
-names(p_max) <- "p_max"
-
-
-# ---- 7.2 Hard class assignment ----
-hard_class <- app(prob_ras, fun = function(v) {
-  if (all(is.na(v))) return(NA_real_)
-  which.max(v)
-})
-names(hard_class) <- "ysd_class_id"
-
-
-# ======================================================================
-# Outputs:
-#   - prob_ras   : per-class probability cube
-#   - p_max      : confidence surface
-#   - hard_class : discrete recovery-stage map
-# ======================================================================
