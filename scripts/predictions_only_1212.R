@@ -43,12 +43,21 @@ stopifnot(length(ysd_levels) == 3)
 # SpatRaster must contain the same spectral bands as used for training
 # (blue, green, red, nir, swir1, swir2)
 
-bap_med <- rast("/mnt/eo/EO4Backcasting/_tiles/bap_med_tile.tif")
+bap_med <- rast("/mnt/dss_europe/level3_interpolated/X0016_Y0020/19900801_LEVEL3_LNDLG_IBAP.tif")
+
+# enforce correct order explicitly (defensive)
+bap_med <- bap_med[[1:6]]
+
+# assign semantic band names expected by the RF model
+names(bap_med) <- c(
+  "blue", "green", "red",
+  "nir", "swir1", "swir2"
+)
 
 expected_bands <- c("blue", "green", "red", "nir", "swir1", "swir2")
 stopifnot(all(expected_bands %in% names(bap_med)))
 
-# enforce band order (defensive programming)
+# enforce band order 
 bap_med <- bap_med[[expected_bands]]
 
 
@@ -88,7 +97,7 @@ rf_fun_probs <- function(model, x, ...) {
 # ======================================================================
 # 4. RUN TILE-WISE PROBABILITY PREDICTION
 # ======================================================================
-out_prob_file <- "/mnt/eo/EO4Backcasting/_predictions/ysd_probs_tile.tif"
+out_prob_file <- "/mnt/eo/EO4Backcasting/_predictions/ysd_probs_tile_1990.tif"
 
 prob_ras <- predict(
   bap_med,
