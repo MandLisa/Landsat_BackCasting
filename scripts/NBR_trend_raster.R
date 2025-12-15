@@ -48,6 +48,20 @@ years <- as.integer(substr(basename(nbr_files), 1, 4))
 
 stopifnot(length(years) == nlyr(nbr_stack))
 
+# crop stack to forest mask
+forest_mask <- rast(
+  "/mnt/eo/EO4Backcasting/_data/forest_mask_eroded_2px.tif"
+)
+
+forest_mask_crop <- crop(
+  forest_mask,
+  ext(nbr_stack)
+)
+
+stack_forest <- mask(
+  nbr_stack,
+  forest_mask_crop
+)
 
 # ----------------------------------------------------------------
 # 2. Define slope function
@@ -61,21 +75,20 @@ nbr_trend_fun <- function(v, yrs) {
 }
 
 
-
 # ----------------------------------------------------------------
 # 3. Compute NBR slope raster
 # ----------------------------------------------------------------
 nbr_slope <- app(
-  nbr_stack,
+  stack_forest,
   fun   = nbr_trend_fun,
   yrs   = years,   # <-- DAS ist der entscheidende Punkt
-  cores = 4
+  cores = 20
 )
 
 
 names(nbr_slope) <- "nbr_slope_1985_1990"
 
-
+plot(nbr_slope)
 # ----------------------------------------------------------------
 # 4. Write output
 # ----------------------------------------------------------------
