@@ -230,3 +230,52 @@ prob_ras
 # 7. DERIVED PRODUCTS
 # ======================================================================
 
+# maximum class probability
+p_max <- app(prob_ras, fun = max, na.rm = TRUE)
+
+# confidence mask
+conf_mask <- p_max >= 0.5
+
+# connected components on confident pixels
+clumps <- patches(
+  conf_mask,
+  directions = 8
+)
+
+# pixel count per clump
+clump_freq <- freq(clumps)
+
+# clumps to keep (MMU >= 6)
+keep_ids <- clump_freq$value[clump_freq$count >= 6]
+
+# final spatial mask
+mmu_mask <- clumps %in% keep_ids
+
+
+# initialise output raster
+binary_ras <- rast(prob_ras)
+values(binary_ras) <- NA
+names(binary_ras) <- paste0("bin_", ysd_levels)
+
+# loop over classes
+for (i in seq_len(nlyr(prob_ras))) {
+  binary_ras[[i]] <- ifel(
+    mmu_mask & (prob_ras[[i]] >= 0.5),
+    1,
+    NA
+  )
+}
+
+
+# ensure no pixel is assigned to more than one class
+overlap_check <- app(binary_ras, fun = function(v) sum(v == 1, na.rm = TRUE))
+global(overlap_check > 1, "sum")
+
+
+writeRaster(
+  binary_ras,
+  "/mnt/eo/EO4Backcasting/_predictions/ysd_bins_BAP1990_forest_p05_mmu6.tif",
+  datatype  = "INT1U",
+  gdal      = c("COMPRESS=LZW", "TILED=YES"),
+  overwrite = TRUE
+)

@@ -6,7 +6,10 @@ library(terra)
 #-------------------------------------------------------------------------------
 # df  ... your training data frame shown in the screenshot
 #      must contain columns: x, y, year
-dt <- as.data.table(DT)          # if it is not yet a data.table
+
+train_csv <- "/mnt/eo/EO4Backcasting/_intermediates/training_healthy_disturbed_2711_final.csv"
+dt <- fread(train_csv)
+#dt <- as.data.table(DT)          # if it is not yet a data.table
 
 nbr_dir  <- "/mnt/eo/eu_mosaics/NBR_comp/"
 pattern  <- "^NBR_(\\d{4})\\.tif$"
