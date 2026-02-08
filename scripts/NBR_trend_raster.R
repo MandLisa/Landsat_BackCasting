@@ -100,3 +100,8 @@ writeRaster(
   gdal      = c("COMPRESS=LZW", "TILED=YES"),
   overwrite = TRUE
 )
+
+
+
+r <- rast("/mnt/eo/eu_mosaics/NBR_comp/NBR_1999.tif")
+plot(r)
