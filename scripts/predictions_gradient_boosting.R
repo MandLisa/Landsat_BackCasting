@@ -166,6 +166,34 @@ acc_test <- mean(pred_test == y_test)
 cat("Test accuracy (ID-split):", round(acc_test, 3), "\n")
 
 # ======================================================================
+# 8. PER-CLASS ACCURACY (TEST SET, ID-SPLIT)
+# ======================================================================
+
+# y_test: true labels (0..K-1)
+# pred_test: predicted labels (0..K-1)
+
+# confusion matrix
+cm <- table(
+  truth = factor(y_test, levels = 0:(K-1), labels = ysd_levels),
+  pred  = factor(pred_test, levels = 0:(K-1), labels = ysd_levels)
+)
+
+print(cm)
+
+# per-class (producer's) accuracy
+class_acc <- diag(prop.table(cm, margin = 1))
+
+cat("\nPer-class accuracy:\n")
+print(round(class_acc, 3))
+
+# overall accuracy (for reference)
+overall_acc <- sum(diag(cm)) / sum(cm)
+cat("\nOverall accuracy:", round(overall_acc, 3), "\n")
+
+
+
+
+# ======================================================================
 # 5. PREDICTION HELPER FOR terra::predict()
 # ======================================================================
 # Returns a matrix [n_pixels × K] of class probabilities
