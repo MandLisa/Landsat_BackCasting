@@ -483,7 +483,7 @@ predict_probs_on_tile <- function(tile_name, tile_path,
 }
 
 # ======================================================================
-# 7) RUN: APPLY TO THREE TILES
+# 7) RUN: APPLY TO THREE TILES - omit this and ump to the next section!
 # ======================================================================
 
 for (nm in names(tiles)) {
