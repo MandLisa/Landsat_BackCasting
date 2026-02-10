@@ -296,6 +296,9 @@ gtsave(gt_thr, out_thr_html)
 # PNG export requires {webshot2} in some setups; try anyway:
 try(gtsave(gt_thr, out_thr_png), silent = TRUE)
 
+gt_thr
+
+
 cat("\nWrote formatted table:\n", out_thr_html, "\n")
 cat("PNG (if supported):\n", out_thr_png, "\n")
 
