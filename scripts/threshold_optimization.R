@@ -1,62 +1,139 @@
-# ============================================================
-# SELF-CONTAINED SETUP
-# Loads data, split, models, and computes validation probabilities
-# ============================================================
+# ======================================================================
+# 03_thresholds_xgb_fast_compare_F1_vs_precision.R  (STAND-ALONE)
+#
+# - Threshold optimisation per zone for XGB ONLY (FAST exact scan)
+# - Compare two objectives:
+#     (A) Precision-first:  maximise min(precision_le10, precision_gt10)
+#     (B) F1-balanced:      maximise macro-F1 = mean(F1_le10, F1_gt10)
+# - Write threshold comparison table
+# - Optionally apply thresholds to XGB probability rasters to create binary rasters
+#
+# Binary raster encoding:
+#   1 = ysd>10
+#   0 = ysd<=10
+# ======================================================================
 
 suppressPackageStartupMessages({
   library(data.table)
   library(terra)
-  library(ranger)
   library(xgboost)
-  library(nnet)
-  library(LiblineaR)
 })
 
-# ------------------------------------------------------------
-# USER SETTINGS
-# ------------------------------------------------------------
+# ======================================================================
+# 0) USER SETTINGS
+# ======================================================================
 
 train_csv      <- "/mnt/eo/EO4Backcasting/_intermediates/training_healthy_disturbed_2711_final.csv"
 out_dir_models <- "/mnt/eo/EO4Backcasting/_models_comparison"
 split_file     <- file.path(out_dir_models, "train_val_split_ids.csv")
+xgb_path       <- file.path(out_dir_models, "xgb_ysd_bin2_prob.rds")
 
 base_pred  <- c("blue", "green", "red", "nir", "swir1", "swir2")
 ysd_levels <- c("ysd1_10", "ysd>10")
+zones      <- c("mediterranean", "temperate", "boreal")
 
-run_mlp <- TRUE
+# outputs
+out_dir_eval <- file.path(out_dir_models, "_internal_validation")
+dir.create(out_dir_eval, showWarnings = FALSE, recursive = TRUE)
+out_thr_csv  <- file.path(out_dir_eval, "thresholds_xgb_compare_precision_vs_F1.csv")
 
-# ------------------------------------------------------------
-# Helper: LiblineaR margin extraction
-# ------------------------------------------------------------
+# probability rasters directory (for applying thresholds)
+out_dir_pred <- "/mnt/eo/EO4Backcasting/_preds_Feb"
+prob_pattern_template <- "^ysd_probs_xgb_%s.*\\.tif$"  # expects ysd_probs_xgb_<zone>*.tif
 
-extract_margin <- function(pred_obj, n_expected) {
-  dv <- NULL
-  if (!is.null(attr(pred_obj, "decisionValues"))) {
-    dv <- attr(pred_obj, "decisionValues")
-  } else if (is.list(pred_obj) && !is.null(pred_obj$decisionValues)) {
-    dv <- pred_obj$decisionValues
-  } else if (is.list(pred_obj) && !is.null(pred_obj$scores)) {
-    dv <- pred_obj$scores
-  }
-  if (is.null(dv)) return(numeric(0))
+# apply thresholds to rasters?
+apply_to_rasters <- TRUE
+
+# do NOT overwrite probability rasters; we write new binary rasters
+suffix_prec <- "_thrMaxMinPrec"
+suffix_f1   <- "_thrMaxMacroF1"
+
+# ======================================================================
+# 1) FAST scan: compute metrics for all thresholds in O(n log n)
+# ======================================================================
+# Threshold rule: predict gt10 if p >= t, else le10.
+
+scan_threshold_metrics_fast <- function(y_true, p_pos) {
+  y_true <- factor(y_true, levels = ysd_levels)
+  p_pos  <- as.numeric(p_pos)
   
-  dv_mat <- as.matrix(dv)
+  ok <- is.finite(p_pos) & !is.na(y_true)
+  y_true <- y_true[ok]
+  p_pos  <- p_pos[ok]
+  n <- length(p_pos)
+  if (n == 0) stop("No valid samples for threshold scanning.")
   
-  if (nrow(dv_mat) == n_expected) return(as.numeric(dv_mat[, 1]))
-  if (ncol(dv_mat) == n_expected) return(as.numeric(t(dv_mat)[, 1]))
+  # positive class = gt10
+  y <- as.integer(y_true == "ysd>10")
   
-  dv_vec <- as.numeric(dv_mat)
-  if (length(dv_vec) == n_expected) return(dv_vec)
-  if (length(dv_vec) == 2L * n_expected) return(matrix(dv_vec, ncol = 2)[, 1])
+  ord <- order(p_pos, decreasing = TRUE)
+  p <- p_pos[ord]
+  y <- y[ord]
   
-  numeric(0)
+  P <- sum(y == 1)       # total gt10
+  N <- n - P             # total le10
+  
+  k  <- seq_len(n)       # predicted positive count at each cut
+  tp <- cumsum(y == 1)
+  fp <- cumsum(y == 0)
+  
+  # Pred pos: k ; Pred neg: n-k
+  tn <- N - fp
+  fn <- P - tp
+  
+  # Precision
+  prec_gt10 <- tp / (tp + fp)             # = tp/k
+  denom_neg <- (tn + fn)                  # = n-k
+  prec_le10 <- ifelse(denom_neg > 0, tn / denom_neg, NA_real_)
+  
+  # Recall
+  rec_gt10 <- ifelse(P > 0, tp / (tp + fn), NA_real_)   # = tp/P
+  rec_le10 <- ifelse(N > 0, tn / (tn + fp), NA_real_)   # = tn/N
+  
+  # F1 per class
+  f1_gt10 <- ifelse(is.finite(prec_gt10 + rec_gt10) & (prec_gt10 + rec_gt10) > 0,
+                    2 * prec_gt10 * rec_gt10 / (prec_gt10 + rec_gt10), NA_real_)
+  f1_le10 <- ifelse(is.finite(prec_le10 + rec_le10) & (prec_le10 + rec_le10) > 0,
+                    2 * prec_le10 * rec_le10 / (prec_le10 + rec_le10), NA_real_)
+  
+  dt <- data.table(
+    threshold = p,   # predict gt10 if p >= threshold
+    precision_gt10 = prec_gt10,
+    precision_le10 = prec_le10,
+    recall_gt10    = rec_gt10,
+    recall_le10    = rec_le10,
+    f1_gt10        = f1_gt10,
+    f1_le10        = f1_le10
+  )
+  
+  # objectives
+  dt[, obj_min_precision := pmin(precision_gt10, precision_le10, na.rm = TRUE)]
+  dt[, obj_macro_f1      := rowMeans(.SD, na.rm = TRUE), .SDcols = c("f1_gt10", "f1_le10")]
+  dt[, mean_precision    := rowMeans(.SD, na.rm = TRUE), .SDcols = c("precision_gt10", "precision_le10")]
+  dt[, min_recall        := pmin(recall_gt10, recall_le10, na.rm = TRUE)]
+  
+  dt
 }
 
-# ------------------------------------------------------------
-# LOAD DATA
-# ------------------------------------------------------------
+pick_best_threshold <- function(scan_dt, objective = c("min_precision", "macro_f1")) {
+  objective <- match.arg(objective)
+  
+  if (objective == "min_precision") {
+    # tie-breakers: mean precision, then min recall, then higher threshold
+    scan_dt <- scan_dt[order(-obj_min_precision, -mean_precision, -min_recall, -threshold)]
+  } else {
+    # macro-F1 tie-breakers: mean precision, then min recall, then threshold
+    scan_dt <- scan_dt[order(-obj_macro_f1, -mean_precision, -min_recall, -threshold)]
+  }
+  
+  scan_dt[1]
+}
 
-cat("\nLoading training CSV...\n")
+# ======================================================================
+# 2) Load validation data (disturbed only) + split + zones
+# ======================================================================
+
+cat("\nLoading CSV...\n")
 dt <- fread(train_csv)
 
 req_cols <- c("ID", "x", "y", "ysd", "state", base_pred)
@@ -69,277 +146,219 @@ dt[ysd >= 1 & ysd <= 10, ysd_bin2 := "ysd1_10"]
 dt[ysd > 10,             ysd_bin2 := "ysd>10"]
 dt <- dt[!is.na(ysd_bin2)]
 dt[, ysd_bin2 := factor(ysd_bin2, levels = ysd_levels)]
-
 dt <- dt[complete.cases(dt[, ..base_pred])]
 
-# ------------------------------------------------------------
-# LOAD SPLIT FILE
-# ------------------------------------------------------------
-
-cat("Loading split file...\n")
+cat("Loading split...\n")
+stopifnot(file.exists(split_file))
 split_dt <- fread(split_file)[, .(ID, set)]
+stopifnot(all(c("ID","set") %in% names(split_dt)))
+if (split_dt[, anyDuplicated(ID)] > 0) stop("Split file has duplicate IDs.")
+
 dt[, set := NA_character_]
 dt[split_dt, on = "ID", set := i.set]
-
 dt_val <- dt[set == "val"]
-
 cat("Validation rows:", nrow(dt_val), "\n")
 
-# ------------------------------------------------------------
-# ZONE ASSIGNMENT
-# ------------------------------------------------------------
-
-pts_3035 <- terra::vect(dt_val[, .(x, y)], geom = c("x", "y"), crs = "EPSG:3035")
+cat("Assigning zones (EPSG:3035 -> lat)...\n")
+pts_3035 <- terra::vect(dt_val[, .(x, y)], geom = c("x","y"), crs = "EPSG:3035")
 pts_ll   <- terra::project(pts_3035, "EPSG:4326")
 ll       <- terra::crds(pts_ll)
 
-dt_val[, lat := ll[, 2]]
-
+dt_val[, lat := ll[,2]]
 dt_val[, zone := fifelse(
   lat < 45, "mediterranean",
   fifelse(lat < 58, "temperate", "boreal")
 )]
-dt_val[, zone := factor(zone, levels = c("mediterranean","temperate","boreal"))]
+dt_val[, zone := factor(zone, levels = zones)]
 
-# ------------------------------------------------------------
-# LOAD MODELS
-# ------------------------------------------------------------
+cat("\nValidation counts by zone × class:\n")
+print(dt_val[, .N, by = .(zone, ysd_bin2)][order(zone, ysd_bin2)])
 
-cat("Loading models...\n")
+# ======================================================================
+# 3) Load XGB + predict p(ysd>10) on validation set
+# ======================================================================
 
-rf_model   <- readRDS(file.path(out_dir_models, "rf_ysd_bin2_prob.rds"))
-svm_bundle <- readRDS(file.path(out_dir_models, "svm_linear_liblinear_platt.rds"))
-xgb_model  <- readRDS(file.path(out_dir_models, "xgb_ysd_bin2_prob.rds"))
+cat("\nLoading XGB model...\n")
+stopifnot(file.exists(xgb_path))
+xgb_model <- readRDS(xgb_path)
 
-mlp_bundle <- NULL
-mlp_path <- file.path(out_dir_models, "mlp_nnet_ysd_bin2_prob_scaled.rds")
-if (run_mlp && file.exists(mlp_path)) {
-  mlp_bundle <- readRDS(mlp_path)
-}
-
-# ------------------------------------------------------------
-# PREDICT ON VALIDATION SET
-# ------------------------------------------------------------
-
-cat("Predicting validation probabilities...\n")
-
+cat("Predicting p(ysd>10) on validation set...\n")
 Xv <- as.matrix(dt_val[, ..base_pred])
+dt_val[, ppos_xgb := as.numeric(predict(xgb_model, xgboost::xgb.DMatrix(Xv)))]
 
-# RF
-p_rf <- predict(rf_model, data = as.data.frame(Xv))$predictions
-p_rf <- p_rf[, ysd_levels, drop = FALSE]
+# ======================================================================
+# 4) Optimise thresholds per zone for BOTH objectives
+# ======================================================================
 
-# SVM
-Xs <- scale(Xv, center = svm_bundle$mean, scale = svm_bundle$sd)
-pr_svm <- predict(svm_bundle$model, Xs, decisionValues = TRUE)
-dec <- extract_margin(pr_svm, n_expected = nrow(Xv))
-p1 <- predict(svm_bundle$cal, newdata = data.frame(dec = dec), type = "response")
-p_svm <- cbind(`ysd1_10` = 1 - p1, `ysd>10` = p1)
+cat("\nOptimising thresholds per zone (FAST) for:\n  A) max-min precision\n  B) max macro-F1\n")
 
-# XGB
-p1_xgb <- predict(xgb_model, xgboost::xgb.DMatrix(Xv))
-p_xgb <- cbind(`ysd1_10` = 1 - p1_xgb, `ysd>10` = p1_xgb)
+thr_rows <- list()
 
-# MLP
-if (!is.null(mlp_bundle)) {
-  Xs2 <- scale(Xv, center = mlp_bundle$mean, scale = mlp_bundle$sd)
-  p_mlp <- predict(mlp_bundle$model, Xs2, type = "raw")
-  colnames(p_mlp) <- ysd_levels
+for (z in zones) {
+  d <- dt_val[zone == z & is.finite(ppos_xgb)]
+  if (nrow(d) == 0) next
+  
+  scan_dt <- scan_threshold_metrics_fast(d$ysd_bin2, d$ppos_xgb)
+  
+  best_prec <- pick_best_threshold(scan_dt, "min_precision")
+  best_f1   <- pick_best_threshold(scan_dt, "macro_f1")
+  
+  thr_rows[[paste0(z, "_prec")]] <- cbind(
+    data.table(zone = z, objective = "max_min_precision"),
+    best_prec[, .(threshold,
+                  obj_min_precision, mean_precision, min_recall,
+                  precision_gt10, precision_le10,
+                  recall_gt10, recall_le10,
+                  f1_gt10, f1_le10,
+                  obj_macro_f1)]
+  )
+  
+  thr_rows[[paste0(z, "_f1")]] <- cbind(
+    data.table(zone = z, objective = "max_macro_F1"),
+    best_f1[, .(threshold,
+                obj_macro_f1, mean_precision, min_recall,
+                precision_gt10, precision_le10,
+                recall_gt10, recall_le10,
+                f1_gt10, f1_le10,
+                obj_min_precision)]
+  )
 }
 
-cat("Validation prediction complete.\n")
+thr_cmp <- rbindlist(thr_rows, fill = TRUE)
+thr_cmp[, model := "xgb"]
+setcolorder(thr_cmp, c("model","zone","objective","threshold",
+                       "obj_min_precision","obj_macro_f1",
+                       "precision_le10","precision_gt10",
+                       "recall_le10","recall_gt10",
+                       "f1_le10","f1_gt10",
+                       "mean_precision","min_recall"))
+print(thr_cmp)
 
+fwrite(thr_cmp, out_thr_csv)
+cat("\nWrote threshold comparison table:\n", out_thr_csv, "\n")
 
-# ============================================================
-# A) Threshold optimisation per zone: maximise min-precision
-# start here if the rest is already in the environment
-# ============================================================
+# ======================================================================
+# 5) Apply thresholds to XGB probability rasters (optional)
+# ======================================================================
 
-pos_class <- "ysd>10"
-ysd_levels <- c("ysd1_10", "ysd>10")
-
-precisions_at_t <- function(y_true, p_pos, t) {
-  pred <- ifelse(p_pos >= t, "ysd>10", "ysd1_10")
-  pred <- factor(pred, levels = ysd_levels)
-  y_true <- factor(y_true, levels = ysd_levels)
+apply_thr_to_prob_raster <- function(prob_file, thr, out_file, overwrite = TRUE) {
+  r <- rast(prob_file)
   
-  cm <- table(y_true, pred)
-  
-  # precision for ysd>10
-  tp_gt10  <- cm["ysd>10", "ysd>10"]
-  col_gt10 <- sum(cm[, "ysd>10"])
-  prec_gt10 <- if (col_gt10 == 0) NA_real_ else tp_gt10 / col_gt10
-  
-  # precision for ysd1_10
-  tp_le10  <- cm["ysd1_10", "ysd1_10"]
-  col_le10 <- sum(cm[, "ysd1_10"])
-  prec_le10 <- if (col_le10 == 0) NA_real_ else tp_le10 / col_le10
-  
-  # recall (diagnostics)
-  row_gt10 <- sum(cm["ysd>10", ])
-  rec_gt10 <- if (row_gt10 == 0) NA_real_ else tp_gt10 / row_gt10
-  row_le10 <- sum(cm["ysd1_10", ])
-  rec_le10 <- if (row_le10 == 0) NA_real_ else tp_le10 / row_le10
-  
-  list(cm=cm, prec_gt10=prec_gt10, prec_le10=prec_le10, rec_gt10=rec_gt10, rec_le10=rec_le10)
-}
-
-opt_threshold_maxmin_precision <- function(y_true, p_pos) {
-  grid <- sort(unique(p_pos))
-  grid <- grid[is.finite(grid)]
-  grid <- unique(c(0, grid, 1))
-  
-  res <- rbindlist(lapply(grid, function(t) {
-    m <- precisions_at_t(y_true, p_pos, t)
-    obj <- min(m$prec_gt10, m$prec_le10, na.rm = TRUE)
-    
-    data.table(
-      threshold = t,
-      obj_min_precision = obj,
-      precision_gt10 = m$prec_gt10,
-      precision_le10 = m$prec_le10,
-      recall_gt10 = m$rec_gt10,
-      recall_le10 = m$rec_le10
-    )
-  }))
-  
-  res[, mean_precision := rowMeans(.SD, na.rm = TRUE), .SDcols = c("precision_gt10","precision_le10")]
-  res[, min_recall := pmin(recall_gt10, recall_le10, na.rm = TRUE)]
-  
-  # tie-breakers: best min-precision, then best mean precision, then best min recall
-  res <- res[order(-obj_min_precision, -mean_precision, -min_recall, threshold)]
-  res[1]
-}
-
-# attach p(ysd>10) for each model
-dt_val[, ppos_rf  := p_rf[,  pos_class]]
-dt_val[, ppos_svm := p_svm[, pos_class]]
-dt_val[, ppos_xgb := p_xgb[, pos_class]]
-if (exists("p_mlp")) dt_val[, ppos_mlp := p_mlp[, pos_class]]
-
-prob_cols <- c(rf="ppos_rf", svm="ppos_svm", xgb="ppos_xgb")
-if ("ppos_mlp" %in% names(dt_val)) prob_cols <- c(prob_cols, mlp="ppos_mlp")
-
-thr_tbl <- rbindlist(lapply(names(prob_cols), function(m) {
-  pc <- prob_cols[[m]]
-  rbindlist(lapply(levels(dt_val$zone), function(z) {
-    d <- dt_val[zone == z & is.finite(get(pc))]
-    if (nrow(d) == 0) return(NULL)
-    best <- opt_threshold_maxmin_precision(d$ysd_bin2, d[[pc]])
-    cbind(data.table(model=m, zone=z), best)
-  }))
-}))
-
-print(thr_tbl)
-
-# save thresholds (choose your folder)
-out_dir_eval <- file.path(out_dir_models, "_internal_validation")
-dir.create(out_dir_eval, showWarnings = FALSE, recursive = TRUE)
-fwrite(thr_tbl, file.path(out_dir_eval, "thresholds_maxmin_precision_by_zone.csv"))
-
-
-
-# ============================================================
-# B) Select XGBoost thresholds + apply to XGB probability rasters
-#     → create binary class rasters (precision-oriented)
-# ============================================================
-
-library(data.table)
-library(terra)
-
-# --- where the probability rasters are (from your prediction script)
-out_dir_pred <- "/mnt/eo/EO4Backcasting/_preds_Feb_2.0"
-
-# --- IMPORTANT: naming suffix so you do NOT overwrite older outputs
-# change this to whatever you want
-bin_suffix <- "_thrMaxMinPrec"
-
-# --- select XGB thresholds per zone
-xgb_thr <- thr_tbl[model == "xgb", .(zone, threshold, obj_min_precision,
-                                     precision_gt10, precision_le10,
-                                     recall_gt10, recall_le10)]
-
-stopifnot(nrow(xgb_thr) > 0)
-setorder(xgb_thr, zone)
-print(xgb_thr)
-
-# --- helper: apply threshold to one raster file
-apply_thr_to_xgb_raster <- function(prob_file, thr, out_file, overwrite = TRUE) {
-  
-  r <- terra::rast(prob_file)
-  
-  # identify the p(ysd>10) band robustly
   idx <- grep("prob_ysd>10", names(r), fixed = TRUE)
   if (length(idx) != 1) {
     stop("Could not uniquely find band 'prob_ysd>10' in: ", prob_file,
-         "\nBands found: ", paste(names(r), collapse = ", "))
+         "\nBands: ", paste(names(r), collapse = ", "))
   }
   
   ppos <- r[[idx]]
-  
-  # Binary classification:
-  # 1 = ysd>10
-  # 0 = ysd<=10
-  cls <- terra::ifel(ppos >= thr, 1, 0)
+  cls  <- ifel(ppos >= thr, 1, 0)
   names(cls) <- "ysd_gt10"
   
-  terra::writeRaster(
-    cls, out_file,
-    datatype = "INT1U",
-    gdal = c("COMPRESS=LZW", "TILED=YES"),
-    overwrite = overwrite
-  )
-  
+  writeRaster(cls, out_file,
+              datatype = "INT1U",
+              gdal = c("COMPRESS=LZW","TILED=YES"),
+              overwrite = overwrite)
   invisible(out_file)
 }
 
-# --- apply per zone
-zones <- as.character(levels(dt_val$zone))  # mediterranean / temperate / boreal
-
-for (z in zones) {
+if (isTRUE(apply_to_rasters)) {
   
-  thr <- xgb_thr[zone == z, threshold]
-  if (length(thr) != 1 || is.na(thr)) stop("No threshold found for zone: ", z)
+  cat("\nApplying BOTH threshold sets to XGB probability rasters...\n")
   
-  # find the probability raster for this zone
-  # If your filenames are exactly 'ysd_probs_xgb_<zone>.tif', you can directly build the path instead.
-  prob_pattern <- paste0("^ysd_probs_xgb_", z, ".*\\.tif$")
-  cand <- list.files(out_dir_pred, pattern = prob_pattern, full.names = TRUE)
-  
-  if (length(cand) == 0) {
-    stop("No XGB probability raster found for zone '", z, "' in ", out_dir_pred,
-         "\nExpected pattern: ", prob_pattern)
+  for (z in zones) {
+    # find prob raster for this zone
+    pat  <- sprintf(prob_pattern_template, z)
+    cand <- list.files(out_dir_pred, pattern = pat, full.names = TRUE)
+    if (length(cand) == 0) stop("No probability raster found for zone ", z, " (pattern: ", pat, ")")
+    
+    if (length(cand) > 1) {
+      cand <- cand[order(file.info(cand)$mtime, decreasing = TRUE)]
+      message("Multiple rasters for zone ", z, ". Using newest:\n  ", cand[1])
+    }
+    prob_file <- cand[1]
+    
+    # thresholds
+    thr_prec <- thr_cmp[zone == z & objective == "max_min_precision", threshold][1]
+    thr_f1   <- thr_cmp[zone == z & objective == "max_macro_F1",     threshold][1]
+    
+    if (!length(thr_prec) || is.na(thr_prec)) stop("Missing precision threshold for ", z)
+    if (!length(thr_f1)   || is.na(thr_f1))   stop("Missing F1 threshold for ", z)
+    
+    out_prec <- file.path(out_dir_pred, paste0("ysd_class_xgb_", z, suffix_prec, ".tif"))
+    out_f1   <- file.path(out_dir_pred, paste0("ysd_class_xgb_", z, suffix_f1,   ".tif"))
+    
+    cat("\n------------------------------------------------------------\n")
+    cat("Zone: ", z, "\n")
+    cat("Prob: ", prob_file, "\n")
+    cat("thr (precision): ", thr_prec, " -> ", out_prec, "\n")
+    cat("thr (macroF1):   ", thr_f1,   " -> ", out_f1,   "\n")
+    
+    apply_thr_to_prob_raster(prob_file, thr_prec, out_prec, overwrite = TRUE)
+    apply_thr_to_prob_raster(prob_file, thr_f1,   out_f1,   overwrite = TRUE)
   }
-  if (length(cand) > 1) {
-    # If you have multiple candidates (e.g., multiple runs), pick the newest by mtime
-    cand <- cand[order(file.info(cand)$mtime, decreasing = TRUE)]
-    message("Multiple rasters for zone ", z, ". Using newest:\n  ", cand[1])
-  }
   
-  prob_file <- cand[1]
-  
-  # output name (unique; will not overwrite probability raster)
-  out_file <- file.path(
-    out_dir_pred,
-    paste0("ysd_class_xgb_", z, bin_suffix, ".tif")
-  )
-  
-  cat("\n------------------------------------------------------------\n")
-  cat("Zone:      ", z, "\n")
-  cat("Threshold: ", thr, "\n")
-  cat("Input:     ", prob_file, "\n")
-  cat("Output:    ", out_file, "\n")
-  
-  apply_thr_to_xgb_raster(prob_file, thr, out_file, overwrite = TRUE)
+  cat("\nDONE: binary rasters written to:\n", out_dir_pred, "\n")
 }
 
-cat("\nDONE: Binary XGB class rasters written to:\n", out_dir_pred, "\n")
 
 
 
+### make a nice table where I compare thresholds
+library(gt)
+library(scales)
 
+# reorder rows for readability
+thr_cmp[, zone := factor(zone, levels = c("mediterranean","temperate","boreal"))]
+thr_cmp[, objective := factor(objective, levels = c("max_min_precision","max_macro_F1"))]
+setorder(thr_cmp, zone, objective)
 
+gt_thr <- gt(thr_cmp) |>
+  fmt_number(columns = "threshold", decimals = 3) |>
+  fmt_percent(
+    columns = c(
+      precision_le10, precision_gt10,
+      recall_le10, recall_gt10,
+      f1_le10, f1_gt10,
+      obj_min_precision, obj_macro_f1,
+      mean_precision, min_recall
+    ),
+    decimals = 1
+  ) |>
+  cols_label(
+    zone = "Zone",
+    objective = "Optimization",
+    threshold = "Threshold",
+    precision_le10 = "≤10y",
+    precision_gt10 = ">10y",
+    recall_le10 = "≤10y",
+    recall_gt10 = ">10y",
+    f1_le10 = "≤10y",
+    f1_gt10 = ">10y",
+    obj_min_precision = "Min precision",
+    obj_macro_f1 = "Macro F1",
+    mean_precision = "Mean precision",
+    min_recall = "Min recall"
+  ) |>
+  tab_spanner(
+    label = "Precision",
+    columns = c(precision_le10, precision_gt10)
+  ) |>
+  tab_spanner(
+    label = "Recall",
+    columns = c(recall_le10, recall_gt10)
+  ) |>
+  tab_spanner(
+    label = "F1 score",
+    columns = c(f1_le10, f1_gt10)
+  ) |>
+  tab_spanner(
+    label = "Objectives",
+    columns = c(obj_min_precision, obj_macro_f1)
+  ) |>
+  tab_header(
+    title = "Threshold optimisation comparison (XGBoost)",
+    subtitle = "Per-zone comparison: precision-first vs F1 optimisation"
+  )
 
-
-
+gt_thr
 
