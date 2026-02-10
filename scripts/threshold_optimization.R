@@ -152,6 +152,7 @@ cat("Validation prediction complete.\n")
 
 # ============================================================
 # A) Threshold optimisation per zone: maximise min-precision
+# start here if the rest is already in the environment
 # ============================================================
 
 pos_class <- "ysd>10"
