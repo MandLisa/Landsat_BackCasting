@@ -267,3 +267,216 @@ cat("\nWrote HTML table for Viewer:\n", out_html, "\n")
 cat("Open it in RStudio Viewer (or browser):\n", out_html, "\n\n")
 
 gt_thr
+
+
+dt_val[, .(
+  mean_prob = mean(ppos_xgb),
+  q90 = quantile(ppos_xgb, 0.9)
+), by = ysd_bin2]
+
+
+dt_val[, .(
+  mean_prob = mean(ppos_xgb),
+  q75 = quantile(ppos_xgb, 0.75),
+  q90 = quantile(ppos_xgb, 0.9)
+), by = .(zone, ysd_bin2)]
+
+
+# pick one objective
+thr_use <- thr_tbl[objective == "precision_priority"]
+
+# apply per-zone threshold and summarize
+res <- rbindlist(lapply(levels(dt_val$zone), function(z){
+  t  <- thr_use[zone == z, threshold][1]
+  d  <- dt_val[zone == z]
+  pred <- ifelse(d$ppos_xgb >= t, "ysd>10", "ysd1_10")
+  pred <- factor(pred, levels = ysd_levels)
+  ytru <- factor(d$ysd_bin2, levels = ysd_levels)
+  
+  cm <- table(ytru, pred)
+  
+  # commission for >10 = 1 - precision(>10)
+  prec_gt10 <- cm["ysd>10","ysd>10"] / sum(cm[,"ysd>10"])
+  comm_gt10 <- 1 - prec_gt10
+  
+  # omission for >10 = 1 - recall(>10)
+  rec_gt10  <- cm["ysd>10","ysd>10"] / sum(cm["ysd>10",])
+  om_gt10   <- 1 - rec_gt10
+  
+  data.table(
+    zone = z,
+    threshold = t,
+    accuracy = sum(diag(cm))/sum(cm),
+    precision_gt10 = prec_gt10,
+    recall_gt10 = rec_gt10,
+    commission_gt10 = comm_gt10,
+    omission_gt10 = om_gt10,
+    n = sum(cm)
+  )
+}))
+
+res
+
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+  library(scales)
+})
+
+# --- ensure data.table
+setDT(dt_val)
+setDT(res)
+
+# keep only what we need
+thr_use <- res[, .(zone, threshold)]
+thr_use[, zone := as.character(zone)]
+dt_val[, zone := as.character(zone)]
+
+# optional: keep consistent facet order
+zone_levels <- c("mediterranean", "temperate", "boreal")
+dt_val[, zone := factor(zone, levels = zone_levels)]
+thr_use[, zone := factor(zone, levels = zone_levels)]
+
+# ---- HISTOGRAMS (faceted) ----
+p_hist <- ggplot(dt_val, aes(x = ppos_xgb)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    binwidth = 0.02,
+    boundary = 0,
+    alpha = 0.6,
+    color = "white",
+    linewidth = 0.2
+  ) +
+  geom_density(linewidth = 0.8, adjust = 1.1) +
+  geom_vline(
+    data = thr_use,
+    aes(xintercept = threshold),
+    linewidth = 1.0,
+    linetype = "solid"
+  ) +
+  facet_grid(zone ~ ysd_bin2) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "XGBoost validation probabilities by zone and reference class",
+    subtitle = "Vertical line = chosen zone-specific threshold for predicting ysd>10",
+    x = "Predicted probability p(ysd > 10)",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold")
+  )
+
+p_hist
+
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(gt)
+  library(scales)
+})
+
+# ---------------------------
+# 0) inputs assumed to exist:
+#   - dt_val with: zone, ysd_bin2, ppos_xgb
+#   - thr_tbl with: model, zone, objective, threshold  (your optimization results)
+# ---------------------------
+
+setDT(dt_val)
+setDT(thr_tbl)
+
+ysd_levels <- c("ysd1_10", "ysd>10")
+dt_val[, zone := as.character(zone)]
+dt_val[, ysd_bin2 := factor(ysd_bin2, levels = ysd_levels)]
+
+# ------------------------------------------------------------
+# 1) keep only xgb + precision_priority, then adjust threshold
+# ------------------------------------------------------------
+thr_use <- thr_tbl[model == "xgb" & objective == "precision_priority", .(zone, threshold)]
+thr_use[, threshold_adj := pmin(threshold + 0.175, 1)]
+thr_use[, threshold := NULL]
+
+# ------------------------------------------------------------
+# 2) helper to compute metrics for a given zone + threshold
+# ------------------------------------------------------------
+metrics_one_zone <- function(d, thr) {
+  pred <- ifelse(d$ppos_xgb >= thr, "ysd>10", "ysd1_10")
+  pred <- factor(pred, levels = ysd_levels)
+  ytru <- factor(d$ysd_bin2, levels = ysd_levels)
+  
+  cm <- table(ytru, pred)
+  
+  acc <- sum(diag(cm)) / sum(cm)
+  
+  # precision/recall for >10
+  tp_gt10 <- cm["ysd>10", "ysd>10"]
+  col_gt10 <- sum(cm[, "ysd>10"])
+  row_gt10 <- sum(cm["ysd>10", ])
+  
+  precision_gt10 <- if (col_gt10 == 0) NA_real_ else tp_gt10 / col_gt10
+  recall_gt10    <- if (row_gt10 == 0) NA_real_ else tp_gt10 / row_gt10
+  
+  commission_gt10 <- 1 - precision_gt10
+  omission_gt10   <- 1 - recall_gt10
+  
+  data.table(
+    accuracy = acc,
+    precision_gt10 = precision_gt10,
+    recall_gt10 = recall_gt10,
+    commission_gt10 = commission_gt10,
+    omission_gt10 = omission_gt10,
+    n = sum(cm),
+    pred_gt10_share = col_gt10 / sum(cm)   # how many pixels you label as >10
+  )
+}
+
+# ------------------------------------------------------------
+# 3) recompute metrics using adjusted thresholds
+# ------------------------------------------------------------
+res_adj <- rbindlist(lapply(thr_use$zone, function(z) {
+  thr <- thr_use[zone == z, threshold_adj][1]
+  d <- dt_val[zone == z & is.finite(ppos_xgb)]
+  if (nrow(d) == 0) return(NULL)
+  cbind(data.table(zone = z, threshold = thr), metrics_one_zone(d, thr))
+}))
+
+# order zones nicely (optional)
+zone_levels <- c("mediterranean", "temperate", "boreal")
+res_adj[, zone := factor(zone, levels = zone_levels)]
+setorder(res_adj, zone)
+
+res_adj
+
+
+### create table
+gt_thr <- gt(res_adj) |>
+  fmt_number(columns = "threshold", decimals = 3) |>
+  fmt_percent(
+    columns = c("accuracy", "precision_gt10", "recall_gt10",
+                "commission_gt10", "omission_gt10", "pred_gt10_share"),
+    decimals = 1
+  ) |>
+  fmt_number(columns = "n", decimals = 0) |>
+  cols_label(
+    zone = "Zone",
+    threshold = "Adjusted threshold",
+    accuracy = "Accuracy",
+    precision_gt10 = "Precision (>10y)",
+    recall_gt10 = "Recall (>10y)",
+    commission_gt10 = "Commission (>10y)",
+    omission_gt10 = "Omission (>10y)",
+    pred_gt10_share = "Share predicted >10y",
+    n = "N (validation)"
+  ) |>
+  tab_header(
+    title = "XGBoost — thresholds",
+    subtitle = ""
+  ) |>
+  tab_options(table.font.size = 14)
+
+gt_thr
+
+
