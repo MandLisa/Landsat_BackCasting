@@ -199,5 +199,15 @@ ggplot(dt_plot, aes(x = class, y = NBR_trend, fill = class)) +
   theme(legend.position = "none")
 
 
+ggplot(dt_plot, aes(x = zone, y = NBR_trend, fill = zone)) +
+  geom_boxplot(outlier.size = 0.4) +
+  facet_wrap(~ class, nrow = 1) +
+  theme_bw(base_size = 13) +
+  labs(
+    x = "Zone",
+    y = "NBR trend",
+    title = ""
+  ) +
+  theme(legend.position = "none")
 
 
