@@ -147,3 +147,28 @@ message(" - RDS: ", out_rds)
 # dt <- readRDS(out_rds)
 # setkey(dt, tile, year)
 # dt[J("X0001_Y0024", 2019), file]
+
+
+library(terra)
+
+# choose one example file
+example_file <- "/mnt/dss_europe/level3_interpolated/X0001_Y0024/19910801_LEVEL3_LNDLG_NBR.tif"
+
+r <- rast(example_file)
+
+r
+
+NAflag(r)
+minmax(r)
+
+setMinMax(r)     # forces computation of min/max by reading data
+minmax(r)
+
+path <- "/mnt/dss_europe/level3_interpolated"
+
+n_folders <- sum(
+  dir.exists(file.path(path, list.files(path)))
+)
+
+n_folders
+
