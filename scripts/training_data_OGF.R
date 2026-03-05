@@ -1,8 +1,29 @@
 # ======================================================================
-# Backcasting training data preparation (tile-wise, RAM-safe)
-# Using:
+# Training data preparation for backcasting forest continuity
+# (tile-wise, RAM-safe, reproducible sampling)
+#
+# Key design (consistent with your final 1985 application):
+#   Reference year: t0
+#   Features:
+#     1) Stable BAP/IBAP "state" around t0 using a SHORT window:
+#        IBAP median over 3 years starting at t0: [t0 .. t0+2]
+#        (For t0 = 1985 this is 1985–1987)
+#     2) NBR recovery behavior after t0:
+#        NBR metrics incl. Theil–Sen slope over [t0 .. t0+10]
+#        (For t0 = 1985 this is 1985–1995)
+#   Label (what the model learns):
+#     undisturbed20y = 1 if NO disturbance in [t0-20 .. t0-1]
+#     undisturbed20y = 0 otherwise
+#   Exclusion (to avoid confusing signals):
+#     drop pixels with disturbance in [t0 .. t0+10]
+#
+# Data structure:
 #   /mnt/dss_europe/level3_interpolated/<TILE>/*_IBAP*.tif
 #   /mnt/dss_europe/level3_interpolated/<TILE>/*_NBR*.tif
+#
+# Output:
+#   One CSV per tile: training_<tile>.csv
+#   Each row corresponds to one (point, t0) sample.
 # ======================================================================
 
 suppressPackageStartupMessages({
@@ -12,10 +33,15 @@ suppressPackageStartupMessages({
 
 # ---------------------------- SETTINGS ---------------------------------
 
-root_dir_interp <- "/mnt/dss_europe/level3_interpolated"   # contains tile folders
-root_dir_yod    <- "/mnt/dss_europe/disturbance_yod"       # year-of-disturbance raster per tile (1 band)
-root_dir_fmask  <- "/mnt/dss_europe/forest_mask"           # forest mask per tile (1=forest)
+# Root directory containing all tile folders
+root_dir_interp <- "/mnt/dss_europe/level3_interpolated"
 
+# Per-tile disturbance year raster (YOD) and forest mask
+# (Adjust these paths if your files are stored differently.)
+root_dir_yod   <- "/mnt/dss_europe/disturbance_yod"
+root_dir_fmask <- "/mnt/dss_europe/forest_mask"
+
+# Output directory
 out_dir <- "/mnt/dss_europe/training_tables"
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -23,27 +49,32 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 ibap_suffix_regex <- "_IBAP.*\\.tif$"
 nbr_suffix_regex  <- "_NBR.*\\.tif$"
 
-# Reference years for training (must allow full lookback + post window)
+# Training reference years t0
+# Must allow: (t0 - 20) >= 1985  AND  (t0 + 10) <= 2024  -> t0 in [2005..2014]
 t0_years <- 2005:2014
 
+# Time windows
 lookback_years <- 20
 post_years     <- 10
 
-# IBAP window around t0: [t0-1 ... t0+3] mirrors 1984–1988 for t0=1985
-ibap_pre  <- 1
-ibap_post <- 3
+# IBAP window definition: 3 years starting at t0 => [t0 .. t0+2]
+ibap_start_offset <- 0
+ibap_end_offset   <- 2
 
-# Sampling per tile per t0 (after QC, per class)
-n_per_class <- 50            # start small; scale to 100–150 later
-oversample_factor <- 4       # sample more candidates, keep n_per_class after QC
+# Sampling size (after QC) per tile and t0
+# Start small; increase later if needed.
+n_per_class <- 50
+oversample_factor <- 4
 seed_base <- 42
 
 # Nodata handling
 nodata_values <- c(-10000, -9999, -32768)
 
-# Minimum valid observations required
-min_valid_ibap_years <- 3    # out of 5 years
-min_valid_nbr_years  <- 8    # out of 11 years
+# Minimum valid observations
+# For IBAP: you are using a 3-year window; require at least 2 valid years per band by default.
+# Set to 3 if you want to require full 3/3 completeness.
+min_valid_ibap_years <- 2   # out of 3
+min_valid_nbr_years  <- 8   # out of 11 (t0..t0+10)
 
 # -------------------------- HELPERS ------------------------------------
 
@@ -130,11 +161,11 @@ sample_points_from_mask <- function(mask_r, n, seed) {
 
 make_training_for_tile <- function(tile) {
   message("Tile: ", tile)
-  
   tile_dir <- file.path(root_dir_interp, tile)
   
-  yod_file   <- pick_one_file(list.files(file.path(root_dir_yod, tile), full.names = TRUE))
-  fmask_file <- pick_one_file(list.files(file.path(root_dir_fmask, tile), full.names = TRUE))
+  # Expect one YOD + one forest mask per tile (adjust pattern if needed)
+  yod_file   <- pick_one_file(list.files(file.path(root_dir_yod, tile), pattern = "\\.tif$", full.names = TRUE))
+  fmask_file <- pick_one_file(list.files(file.path(root_dir_fmask, tile), pattern = "\\.tif$", full.names = TRUE))
   
   if (is.na(yod_file) || is.na(fmask_file)) {
     warning("Missing YOD or forest mask for tile ", tile, " -> skipping.")
@@ -153,8 +184,8 @@ make_training_for_tile <- function(tile) {
   for (t0 in t0_years) {
     message("  t0 = ", t0)
     
-    ibap_years <- (t0 - ibap_pre):(t0 + ibap_post)
-    nbr_years  <- t0:(t0 + post_years)
+    ibap_years <- (t0 + ibap_start_offset):(t0 + ibap_end_offset)  # [t0 .. t0+2]
+    nbr_years  <- t0:(t0 + post_years)                             # [t0 .. t0+10]
     
     ibap_files <- list_year_files(tile_dir, ibap_years, ibap_suffix_regex)
     nbr_files  <- list_year_files(tile_dir, nbr_years,  nbr_suffix_regex)
@@ -164,20 +195,22 @@ make_training_for_tile <- function(tile) {
       next
     }
     
-    # Valid forest area
+    # Base valid area: forest mask
     valid <- (fmask == 1)
     
-    # Exclude disturbances in post window [t0 .. t0+post_years]
+    # Exclude disturbances in the post window [t0 .. t0+10]
+    # NOTE: This assumes YOD encodes a (single) relevant disturbance year per pixel.
     post_ok <- is.na(yod) | yod == 0 | yod < t0 | yod > (t0 + post_years)
     valid <- valid & post_ok
     
-    # Class masks based on lookback [t0-20 .. t0-1]
+    # Define class masks based on lookback [t0-20 .. t0-1]
     disturbed <- valid & (yod >= (t0 - lookback_years) & yod <= (t0 - 1))
     undist    <- valid & (is.na(yod) | yod == 0 | yod < (t0 - lookback_years) | yod > (t0 - 1))
     
     disturbed_m <- ifel(disturbed, 1, NA)
     undist_m    <- ifel(undist,    1, NA)
     
+    # Oversample candidates to survive QC filtering
     n_need <- n_per_class * oversample_factor
     
     pts_d <- try(sample_points_from_mask(disturbed_m, n_need, seed_base + t0 * 10 + 1), silent = TRUE)
@@ -192,7 +225,7 @@ make_training_for_tile <- function(tile) {
     pts_u$state <- "undisturbed"
     pts <- rbind(pts_d, pts_u)
     
-    # Extract YOD at points for metadata + ysd (not for predictors at inference)
+    # Extract YOD at points (metadata) + years since disturbance (ysd) for disturbed points
     yod_val <- terra::extract(yod, pts, ID = FALSE)[, 1]
     yod_val <- clean_nodata(yod_val)
     ysd_val <- ifelse(!is.na(yod_val) & yod_val >= (t0 - lookback_years) & yod_val <= (t0 - 1),
@@ -201,15 +234,22 @@ make_training_for_tile <- function(tile) {
     # -------------------- Extract IBAP features --------------------
     ibap_r <- rast(unname(ibap_files))
     ibap1  <- rast(unname(ibap_files)[1])
+    
     band_names <- names(ibap1)
     if (is.null(band_names) || anyNA(band_names)) band_names <- paste0("B", seq_len(nlyr(ibap1)))
     
     ibap_ex <- as.data.table(terra::extract(ibap_r, pts, ID = FALSE))
     ibap_ex[] <- lapply(ibap_ex, clean_nodata)
     ibap_mat <- as.matrix(ibap_ex)
+    
+    # Conservative completeness counter across all (years * bands)
     ibap_n_valid_all <- rowSums(!is.na(ibap_mat))
     
-    ibap_feat <- ibap_median_features(ibap_mat, n_years = length(ibap_years), band_names = band_names)
+    ibap_feat <- ibap_median_features(
+      ibap_extract_mat = ibap_mat,
+      n_years = length(ibap_years),
+      band_names = band_names
+    )
     
     # -------------------- Extract NBR metrics ----------------------
     nbr_r  <- rast(unname(nbr_files))
@@ -219,7 +259,7 @@ make_training_for_tile <- function(tile) {
     
     nbr_feat <- nbr_metrics(nbr_mat, years_vec = nbr_years)
     
-    # -------------------- Assemble table --------------------------
+    # -------------------- Assemble table ---------------------------
     xy <- crds(pts, df = TRUE)
     
     dt <- data.table(
@@ -235,7 +275,9 @@ make_training_for_tile <- function(tile) {
     
     dt <- cbind(dt, ibap_feat, nbr_feat)
     
-    # QC filters
+    # QC filters:
+    # - require enough valid NBR observations in [t0..t0+10]
+    # - require enough valid IBAP observations across (years * bands)
     dt <- dt[
       nbr_n_valid >= min_valid_nbr_years &
         ibap_n_valid_all >= (min_valid_ibap_years * length(band_names))
@@ -270,7 +312,7 @@ tiles <- list.dirs(root_dir_interp, full.names = FALSE, recursive = FALSE)
 tiles <- tiles[grepl("^X\\d{4}_Y\\d{4}$", tiles)]
 if (length(tiles) == 0) stop("No tiles found under root_dir_interp.")
 
-# Start with a single test tile first:
+# For a quick test:
 # tiles <- "X0002_Y0024"
 
 for (tile in tiles) {
