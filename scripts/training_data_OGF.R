@@ -2,28 +2,9 @@
 # Training data preparation for backcasting forest continuity
 # (tile-wise, RAM-safe, reproducible sampling)
 #
-# Key design (consistent with your final 1985 application):
-#   Reference year: t0
-#   Features:
-#     1) Stable BAP/IBAP "state" around t0 using a SHORT window:
-#        IBAP median over 3 years starting at t0: [t0 .. t0+2]
-#        (For t0 = 1985 this is 1985–1987)
-#     2) NBR recovery behavior after t0:
-#        NBR metrics incl. Theil–Sen slope over [t0 .. t0+10]
-#        (For t0 = 1985 this is 1985–1995)
-#   Label (what the model learns):
-#     undisturbed20y = 1 if NO disturbance in [t0-20 .. t0-1]
-#     undisturbed20y = 0 otherwise
-#   Exclusion (to avoid confusing signals):
-#     drop pixels with disturbance in [t0 .. t0+10]
-#
-# Data structure:
-#   /mnt/dss_europe/level3_interpolated/<TILE>/*_IBAP*.tif
-#   /mnt/dss_europe/level3_interpolated/<TILE>/*_NBR*.tif
-#
-# Output:
-#   One CSV per tile: training_<tile>.csv
-#   Each row corresponds to one (point, t0) sample.
+# CHANGE vs. previous version:
+#   - YOD raster and forest mask are read as EUROPEAN MOSAICS (single files)
+#   - For each tile, we crop/resample those mosaics to the tile grid
 # ======================================================================
 
 suppressPackageStartupMessages({
@@ -36,10 +17,10 @@ suppressPackageStartupMessages({
 # Root directory containing all tile folders
 root_dir_interp <- "/mnt/dss_europe/level3_interpolated"
 
-# Per-tile disturbance year raster (YOD) and forest mask
-# (Adjust these paths if your files are stored differently.)
-root_dir_yod   <- "/mnt/dss_europe/disturbance_yod"
-root_dir_fmask <- "/mnt/dss_europe/forest_mask"
+# European mosaic disturbance year raster (YOD) and forest mask
+# Provide either a direct .tif path OR a directory containing the mosaic tif.
+yod_mosaic_path   <- "/mnt/dss_europe/disturbance_yod"  # <- directory or file
+fmask_mosaic_path <- "/mnt/dss_europe/forest_mask"      # <- directory or file
 
 # Output directory
 out_dir <- "/mnt/dss_europe/training_tables"
@@ -50,7 +31,6 @@ ibap_suffix_regex <- "_IBAP.*\\.tif$"
 nbr_suffix_regex  <- "_NBR.*\\.tif$"
 
 # Training reference years t0
-# Must allow: (t0 - 20) >= 1985  AND  (t0 + 10) <= 2024  -> t0 in [2005..2014]
 t0_years <- 2005:2014
 
 # Time windows
@@ -62,7 +42,6 @@ ibap_start_offset <- 0
 ibap_end_offset   <- 2
 
 # Sampling size (after QC) per tile and t0
-# Start small; increase later if needed.
 n_per_class <- 50
 oversample_factor <- 4
 seed_base <- 42
@@ -71,8 +50,6 @@ seed_base <- 42
 nodata_values <- c(-10000, -9999, -32768)
 
 # Minimum valid observations
-# For IBAP: you are using a 3-year window; require at least 2 valid years per band by default.
-# Set to 3 if you want to require full 3/3 completeness.
 min_valid_ibap_years <- 2   # out of 3
 min_valid_nbr_years  <- 8   # out of 11 (t0..t0+10)
 
@@ -84,6 +61,18 @@ pick_one_file <- function(files) {
   if (length(files) == 0) return(NA_character_)
   files <- sort(files)
   files[1]
+}
+
+get_mosaic_rast <- function(path_or_dir) {
+  if (file.exists(path_or_dir) && !dir.exists(path_or_dir)) {
+    return(rast(path_or_dir))
+  }
+  if (dir.exists(path_or_dir)) {
+    ff <- pick_one_file(list.files(path_or_dir, pattern = "\\.tif$", full.names = TRUE))
+    if (is.na(ff)) stop("No .tif found in: ", path_or_dir)
+    return(rast(ff))
+  }
+  stop("Path does not exist: ", path_or_dir)
 }
 
 list_year_files <- function(tile_dir, years, suffix_regex) {
@@ -157,26 +146,44 @@ sample_points_from_mask <- function(mask_r, n, seed) {
                     na.rm = TRUE, xy = TRUE, as.points = TRUE, values = FALSE)
 }
 
+# ---------------------- READ MOSAICS ONCE ------------------------------
+
+yod_mosaic   <- get_mosaic_rast(yod_mosaic_path)
+fmask_mosaic <- get_mosaic_rast(fmask_mosaic_path)
+
 # ----------------------- MAIN PER TILE ---------------------------------
 
 make_training_for_tile <- function(tile) {
   message("Tile: ", tile)
   tile_dir <- file.path(root_dir_interp, tile)
   
-  # Expect one YOD + one forest mask per tile (adjust pattern if needed)
-  yod_file   <- pick_one_file(list.files(file.path(root_dir_yod, tile), pattern = "\\.tif$", full.names = TRUE))
-  fmask_file <- pick_one_file(list.files(file.path(root_dir_fmask, tile), pattern = "\\.tif$", full.names = TRUE))
-  
-  if (is.na(yod_file) || is.na(fmask_file)) {
-    warning("Missing YOD or forest mask for tile ", tile, " -> skipping.")
+  # Build a tile template grid from any IBAP/NBR file (only for geometry)
+  any_ibap <- pick_one_file(list.files(tile_dir, pattern = ibap_suffix_regex, full.names = TRUE))
+  any_nbr  <- pick_one_file(list.files(tile_dir, pattern = nbr_suffix_regex,  full.names = TRUE))
+  template_file <- if (!is.na(any_ibap)) any_ibap else any_nbr
+  if (is.na(template_file)) {
+    warning("No IBAP/NBR files found in tile folder ", tile, " -> skipping.")
     return(NULL)
   }
   
-  yod   <- rast(yod_file)
-  fmask <- rast(fmask_file)
+  template <- rast(template_file)
+  template1 <- template[[1]]
   
-  if (!compareGeom(yod, fmask, stopOnError = FALSE)) {
-    stop("Geometry mismatch between YOD and forest mask for tile ", tile)
+  # Crop mosaics to tile extent and align to tile grid (RAM-safe window reads)
+  yod_t   <- crop(yod_mosaic,   ext(template1), snap = "out")
+  fmask_t <- crop(fmask_mosaic, ext(template1), snap = "out")
+  
+  if (ncell(yod_t) == 0 || ncell(fmask_t) == 0) {
+    warning("Tile extent outside mosaic coverage for tile ", tile, " -> skipping.")
+    return(NULL)
+  }
+  
+  # Ensure same geometry as tile grid (nearest neighbour for categorical rasters)
+  if (!compareGeom(yod_t, template1, stopOnError = FALSE)) {
+    yod_t <- resample(yod_t, template1, method = "near")
+  }
+  if (!compareGeom(fmask_t, template1, stopOnError = FALSE)) {
+    fmask_t <- resample(fmask_t, template1, method = "near")
   }
   
   tile_dt_list <- list()
@@ -195,17 +202,16 @@ make_training_for_tile <- function(tile) {
       next
     }
     
-    # Base valid area: forest mask
-    valid <- (fmask == 1)
+    # Base valid area: forest mask (on tile-aligned mosaic crop)
+    valid <- (fmask_t == 1)
     
     # Exclude disturbances in the post window [t0 .. t0+10]
-    # NOTE: This assumes YOD encodes a (single) relevant disturbance year per pixel.
-    post_ok <- is.na(yod) | yod == 0 | yod < t0 | yod > (t0 + post_years)
+    post_ok <- is.na(yod_t) | yod_t == 0 | yod_t < t0 | yod_t > (t0 + post_years)
     valid <- valid & post_ok
     
-    # Define class masks based on lookback [t0-20 .. t0-1]
-    disturbed <- valid & (yod >= (t0 - lookback_years) & yod <= (t0 - 1))
-    undist    <- valid & (is.na(yod) | yod == 0 | yod < (t0 - lookback_years) | yod > (t0 - 1))
+    # Class masks based on lookback [t0-20 .. t0-1]
+    disturbed <- valid & (yod_t >= (t0 - lookback_years) & yod_t <= (t0 - 1))
+    undist    <- valid & (is.na(yod_t) | yod_t == 0 | yod_t < (t0 - lookback_years))
     
     disturbed_m <- ifel(disturbed, 1, NA)
     undist_m    <- ifel(undist,    1, NA)
@@ -225,8 +231,8 @@ make_training_for_tile <- function(tile) {
     pts_u$state <- "undisturbed"
     pts <- rbind(pts_d, pts_u)
     
-    # Extract YOD at points (metadata) + years since disturbance (ysd) for disturbed points
-    yod_val <- terra::extract(yod, pts, ID = FALSE)[, 1]
+    # Extract YOD at points (metadata)
+    yod_val <- terra::extract(yod_t, pts, ID = FALSE)[, 1]
     yod_val <- clean_nodata(yod_val)
     ysd_val <- ifelse(!is.na(yod_val) & yod_val >= (t0 - lookback_years) & yod_val <= (t0 - 1),
                       t0 - yod_val, NA_real_)
@@ -242,7 +248,6 @@ make_training_for_tile <- function(tile) {
     ibap_ex[] <- lapply(ibap_ex, clean_nodata)
     ibap_mat <- as.matrix(ibap_ex)
     
-    # Conservative completeness counter across all (years * bands)
     ibap_n_valid_all <- rowSums(!is.na(ibap_mat))
     
     ibap_feat <- ibap_median_features(
@@ -275,9 +280,7 @@ make_training_for_tile <- function(tile) {
     
     dt <- cbind(dt, ibap_feat, nbr_feat)
     
-    # QC filters:
-    # - require enough valid NBR observations in [t0..t0+10]
-    # - require enough valid IBAP observations across (years * bands)
+    # QC filters
     dt <- dt[
       nbr_n_valid >= min_valid_nbr_years &
         ibap_n_valid_all >= (min_valid_ibap_years * length(band_names))
@@ -312,7 +315,7 @@ tiles <- list.dirs(root_dir_interp, full.names = FALSE, recursive = FALSE)
 tiles <- tiles[grepl("^X\\d{4}_Y\\d{4}$", tiles)]
 if (length(tiles) == 0) stop("No tiles found under root_dir_interp.")
 
-# For a quick test:
+# Quick test:
 # tiles <- "X0002_Y0024"
 
 for (tile in tiles) {
