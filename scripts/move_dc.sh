@@ -2,7 +2,7 @@ SRC="/mnt/eo/EO4Alps/level2/"
 #DST_LND="/mnt/dss_alps/fdrebes/alps/level2_LS"
 DST_SEN="/mnt/dss_alps/fdrebes/alps/level2_S2"
 
-BW=50000   # KiB/s 
+BW=70000   # KiB/s 
 
 
 
