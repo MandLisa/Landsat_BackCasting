@@ -2,9 +2,11 @@
 # Training data preparation for backcasting forest continuity
 # (tile-wise, RAM-safe, reproducible sampling)
 #
-# CHANGE vs. previous version:
-#   - YOD raster and forest mask are read as EUROPEAN MOSAICS (single files)
-#   - For each tile, we crop/resample those mosaics to the tile grid
+# Key changes in this version:
+#   1) IBAP feature names are fixed: ibap_B1_med ... ibap_B6_med
+#      -> avoids year-coded column names and "NA columns" across t0 blocks
+#   2) Clean nodata in YOD and forest mask BEFORE building class masks
+#   3) Forest mask can be multi-class: set forest_values accordingly
 # ======================================================================
 
 suppressPackageStartupMessages({
@@ -14,44 +16,37 @@ suppressPackageStartupMessages({
 
 # ---------------------------- SETTINGS ---------------------------------
 
-# Root directory containing all tile folders
 root_dir_interp <- "/mnt/dss_europe/level3_interpolated"
 
-# European mosaic disturbance year raster (YOD) and forest mask
-# Provide either a direct .tif path OR a directory containing the mosaic tif.
-yod_mosaic_path   <- "/mnt/dss_europe/disturbance_yod"  # <- directory or file
-fmask_mosaic_path <- "/mnt/dss_europe/forest_mask"      # <- directory or file
+yod_mosaic_path   <- "/mnt/eo/EFDA_v211/yod_aligned.tif"
+fmask_mosaic_path <- "/mnt/eo/EFDA_v211/forest_landuse_aligned.tif"
 
-# Output directory
-out_dir <- "/mnt/dss_europe/training_tables"
+out_dir <- "/mnt/eo/EO4Backcasting/training_data"
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
-# File patterns inside each tile folder
 ibap_suffix_regex <- "_IBAP.*\\.tif$"
 nbr_suffix_regex  <- "_NBR.*\\.tif$"
 
-# Training reference years t0
 t0_years <- 2005:2014
 
-# Time windows
 lookback_years <- 20
 post_years     <- 10
 
-# IBAP window definition: 3 years starting at t0 => [t0 .. t0+2]
 ibap_start_offset <- 0
 ibap_end_offset   <- 2
 
-# Sampling size (after QC) per tile and t0
 n_per_class <- 50
 oversample_factor <- 4
 seed_base <- 42
 
-# Nodata handling
 nodata_values <- c(-10000, -9999, -32768)
 
-# Minimum valid observations
 min_valid_ibap_years <- 2   # out of 3
 min_valid_nbr_years  <- 8   # out of 11 (t0..t0+10)
+
+# Forest mask definition:
+# If your forest mask is coded differently, adjust this vector.
+forest_values <- c(1)
 
 # -------------------------- HELPERS ------------------------------------
 
@@ -87,9 +82,17 @@ list_year_files <- function(tile_dir, years, suffix_regex) {
   out
 }
 
-clean_nodata <- function(x, nodata = nodata_values) {
+clean_nodata_vec <- function(x, nodata = nodata_values) {
   for (v in nodata) x[x == v] <- NA_real_
   x
+}
+
+# Replace nodata values in a SpatRaster with NA (tile-cropped rasters only)
+clean_nodata_rast <- function(r, nodata = nodata_values) {
+  for (v in nodata) {
+    r <- ifel(r == v, NA, r)
+  }
+  r
 }
 
 row_median_fast <- function(mat) {
@@ -123,6 +126,7 @@ nbr_metrics <- function(nbr_mat, years_vec) {
   out
 }
 
+# IMPORTANT: band_names must be stable (B1..B6) to avoid year-coded columns
 ibap_median_features <- function(ibap_extract_mat, n_years, band_names) {
   n_bands <- length(band_names)
   stopifnot(ncol(ibap_extract_mat) == n_years * n_bands)
@@ -136,7 +140,7 @@ ibap_median_features <- function(ibap_extract_mat, n_years, band_names) {
   }
   
   out <- as.data.table(feats)
-  setnames(out, paste0("ibap_", make.names(band_names), "_med"))
+  setnames(out, paste0("ibap_", band_names, "_med"))
   out
 }
 
@@ -157,7 +161,6 @@ make_training_for_tile <- function(tile) {
   message("Tile: ", tile)
   tile_dir <- file.path(root_dir_interp, tile)
   
-  # Build a tile template grid from any IBAP/NBR file (only for geometry)
   any_ibap <- pick_one_file(list.files(tile_dir, pattern = ibap_suffix_regex, full.names = TRUE))
   any_nbr  <- pick_one_file(list.files(tile_dir, pattern = nbr_suffix_regex,  full.names = TRUE))
   template_file <- if (!is.na(any_ibap)) any_ibap else any_nbr
@@ -169,7 +172,7 @@ make_training_for_tile <- function(tile) {
   template <- rast(template_file)
   template1 <- template[[1]]
   
-  # Crop mosaics to tile extent and align to tile grid (RAM-safe window reads)
+  # Crop mosaics to tile extent and align to tile grid
   yod_t   <- crop(yod_mosaic,   ext(template1), snap = "out")
   fmask_t <- crop(fmask_mosaic, ext(template1), snap = "out")
   
@@ -178,7 +181,6 @@ make_training_for_tile <- function(tile) {
     return(NULL)
   }
   
-  # Ensure same geometry as tile grid (nearest neighbour for categorical rasters)
   if (!compareGeom(yod_t, template1, stopOnError = FALSE)) {
     yod_t <- resample(yod_t, template1, method = "near")
   }
@@ -186,13 +188,17 @@ make_training_for_tile <- function(tile) {
     fmask_t <- resample(fmask_t, template1, method = "near")
   }
   
+  # Clean nodata on the tile-cropped rasters (prevents nodata -> "undisturbed")
+  yod_t   <- clean_nodata_rast(yod_t,   nodata_values)
+  fmask_t <- clean_nodata_rast(fmask_t, nodata_values)
+  
   tile_dt_list <- list()
   
   for (t0 in t0_years) {
     message("  t0 = ", t0)
     
-    ibap_years <- (t0 + ibap_start_offset):(t0 + ibap_end_offset)  # [t0 .. t0+2]
-    nbr_years  <- t0:(t0 + post_years)                             # [t0 .. t0+10]
+    ibap_years <- (t0 + ibap_start_offset):(t0 + ibap_end_offset)
+    nbr_years  <- t0:(t0 + post_years)
     
     ibap_files <- list_year_files(tile_dir, ibap_years, ibap_suffix_regex)
     nbr_files  <- list_year_files(tile_dir, nbr_years,  nbr_suffix_regex)
@@ -202,10 +208,10 @@ make_training_for_tile <- function(tile) {
       next
     }
     
-    # Base valid area: forest mask (on tile-aligned mosaic crop)
-    valid <- (fmask_t == 1)
+    # Base valid area: forest mask
+    valid <- (fmask_t %in% forest_values)
     
-    # Exclude disturbances in the post window [t0 .. t0+10]
+    # Exclude disturbances in [t0 .. t0+10]
     post_ok <- is.na(yod_t) | yod_t == 0 | yod_t < t0 | yod_t > (t0 + post_years)
     valid <- valid & post_ok
     
@@ -216,7 +222,6 @@ make_training_for_tile <- function(tile) {
     disturbed_m <- ifel(disturbed, 1, NA)
     undist_m    <- ifel(undist,    1, NA)
     
-    # Oversample candidates to survive QC filtering
     n_need <- n_per_class * oversample_factor
     
     pts_d <- try(sample_points_from_mask(disturbed_m, n_need, seed_base + t0 * 10 + 1), silent = TRUE)
@@ -231,21 +236,23 @@ make_training_for_tile <- function(tile) {
     pts_u$state <- "undisturbed"
     pts <- rbind(pts_d, pts_u)
     
-    # Extract YOD at points (metadata)
+    # Extract YOD at points
     yod_val <- terra::extract(yod_t, pts, ID = FALSE)[, 1]
-    yod_val <- clean_nodata(yod_val)
+    yod_val <- clean_nodata_vec(yod_val)
+    
     ysd_val <- ifelse(!is.na(yod_val) & yod_val >= (t0 - lookback_years) & yod_val <= (t0 - 1),
                       t0 - yod_val, NA_real_)
     
     # -------------------- Extract IBAP features --------------------
     ibap_r <- rast(unname(ibap_files))
-    ibap1  <- rast(unname(ibap_files)[1])
+    n_bands <- nlyr(ibap_r) / length(ibap_years)
+    if (n_bands != round(n_bands)) stop("IBAP stack has unexpected number of layers in tile ", tile)
     
-    band_names <- names(ibap1)
-    if (is.null(band_names) || anyNA(band_names)) band_names <- paste0("B", seq_len(nlyr(ibap1)))
+    n_bands <- as.integer(n_bands)
+    band_names <- paste0("B", seq_len(n_bands))  # stable names
     
     ibap_ex <- as.data.table(terra::extract(ibap_r, pts, ID = FALSE))
-    ibap_ex[] <- lapply(ibap_ex, clean_nodata)
+    ibap_ex[] <- lapply(ibap_ex, clean_nodata_vec)
     ibap_mat <- as.matrix(ibap_ex)
     
     ibap_n_valid_all <- rowSums(!is.na(ibap_mat))
@@ -259,7 +266,7 @@ make_training_for_tile <- function(tile) {
     # -------------------- Extract NBR metrics ----------------------
     nbr_r  <- rast(unname(nbr_files))
     nbr_ex <- as.data.table(terra::extract(nbr_r, pts, ID = FALSE))
-    nbr_ex[] <- lapply(nbr_ex, clean_nodata)
+    nbr_ex[] <- lapply(nbr_ex, clean_nodata_vec)
     nbr_mat <- as.matrix(nbr_ex)
     
     nbr_feat <- nbr_metrics(nbr_mat, years_vec = nbr_years)
@@ -272,7 +279,7 @@ make_training_for_tile <- function(tile) {
       x = xy[, 1], y = xy[, 2],
       tile = tile, t0 = t0,
       state = pts$state,
-      label_undisturbed20y = as.integer(pts$state == "undisturbed"),
+      label_undisturbed_20y = as.integer(pts$state == "undisturbed"),
       yod = yod_val,
       ysd = ysd_val,
       ibap_n_valid_all = ibap_n_valid_all
@@ -301,12 +308,12 @@ make_training_for_tile <- function(tile) {
     
     tile_dt_list[[as.character(t0)]] <- rbind(dt_u, dt_d)
     
-    rm(ibap_r, ibap1, nbr_r, ibap_ex, nbr_ex, ibap_mat, nbr_mat, dt, dt_u, dt_d)
+    rm(ibap_r, nbr_r, ibap_ex, nbr_ex, ibap_mat, nbr_mat, dt, dt_u, dt_d)
     gc()
   }
   
   if (length(tile_dt_list) == 0) return(NULL)
-  rbindlist(tile_dt_list, use.names = TRUE, fill = TRUE)
+  rbindlist(tile_dt_list, use.names = TRUE)
 }
 
 # ----------------------------- RUN -------------------------------------
