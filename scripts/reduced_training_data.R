@@ -152,4 +152,15 @@ cat("Wrote tile summary:", out_tilesum, "\n")
 
 ### Import reduced training dataset with biome info
 
+library(sf)
+
+training <- st_read("/mnt/eo/EO4Backcasting/_data/biomes_join.gpkg")
+
+
+training <- training[, -c(14:19, 21:30)]
+
+st_write(training, "/mnt/eo/EO4Backcasting/model_input/training_biomes.gpkg", delete_dsn = TRUE)
+write.csv(st_drop_geometry(training), "/mnt/eo/EO4Backcasting/model_input/training_biomes.csv", row.names = FALSE)
+
+
 
