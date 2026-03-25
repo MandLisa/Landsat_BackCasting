@@ -234,7 +234,7 @@ for (tile_i in seq_along(tiles)) {
   gc()
 }
 
-# -------------------------- MERGE BACK ---------------------------------
+# -------------------------- MERGE BACK --------------------------------
 
 cat("\nCombining extracted STM features ...\n")
 stm_dt <- rbindlist(result_list, use.names = TRUE, fill = TRUE)
