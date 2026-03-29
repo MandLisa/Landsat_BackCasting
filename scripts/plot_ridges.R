@@ -73,7 +73,7 @@ plot_ridge_gradient_reds <- function(df, title = NULL) {
 }
 
 
-
+# apply
 p_fixed <- plot_ridge_gradient_reds(
   df_fixed,
   title = ""
