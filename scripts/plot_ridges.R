@@ -11,6 +11,7 @@ fp_fixed <- "/mnt/eo/EO4Backcasting/_data/country_probability_samples_2000.csv"
 df_area  <- read_csv(fp_area, show_col_types = FALSE)
 df_fixed <- read_csv(fp_fixed, show_col_types = FALSE)
 
+# define function
 plot_ridge_gradient_reds <- function(df, title = NULL) {
   
   mean_df <- df %>%
