@@ -4,7 +4,7 @@ library(ggplot2)
 library(ggridges)
 library(forcats)
 
-# Pfade anpassen
+# Paths
 fp_area  <- "/mnt/eo/EO4Backcasting/_data/country_probability_samples_area_based.csv"
 fp_fixed <- "/mnt/eo/EO4Backcasting/_data/country_probability_samples_2000.csv"
 
