@@ -83,6 +83,7 @@ p_fixed <- plot_ridge_gradient_reds(
 p_fixed
 
 
+# save
 ggsave(
   filename = "/mnt/eo/EO4Backcasting/_figs/ridgeplot_fixed_2000.png",
   plot = p_fixed,
